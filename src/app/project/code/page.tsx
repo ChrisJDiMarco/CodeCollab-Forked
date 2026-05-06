@@ -503,7 +503,7 @@ function SoloChatPageContent() {
             peerName: event.peerName || "Peer",
             conversationId: event.conversationId || "unknown",
             scope: event.scope || "unknown",
-            tokens: ((existing?.tokens || "") + (event.token || "")).slice(-4000),
+            tokens: ((existing?.tokens || "") + (event.token || "")).slice(-20000),
             updatedAt: Date.now(),
             taskId: event.taskId || existing?.taskId || null,
             taskName: event.taskName || existing?.taskName || null,
@@ -1558,11 +1558,13 @@ function SoloChatPageContent() {
                               AI responding
                             </span>
                           </div>
-                          <div className="mt-1.5 app-surface overflow-hidden rounded-[1.2rem] shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
-                            <pre className="custom-scroll max-h-[280px] min-h-[60px] overflow-y-auto px-4 py-3 font-mono text-[11.5px] leading-[1.72] theme-soft whitespace-pre-wrap">
-                              {stream.tokens.slice(-4000) || <span className="theme-muted italic">Waiting for response...</span>}
-                            </pre>
-                          </div>
+                          <ActivityStream
+                            text={stream.tokens}
+                            rawText={stream.tokens}
+                            isStreaming
+                            className="mt-1.5 max-h-[400px] app-surface overflow-hidden rounded-[1.2rem] shadow-[0_8px_24px_rgba(0,0,0,0.06)]"
+                            showRawOutput
+                          />
                         </div>
                       </div>
                     );
