@@ -101,7 +101,7 @@ type QueueItem = {
   id: string;
   title: string;
   description: string;
-  kind: "approval" | "active";
+  kind: "approval" | "active" | "question";
   since: number;
 };
 
@@ -167,6 +167,19 @@ export default function ActivityPage() {
             title: "Waiting for your approval",
             description: p.summary ?? p.toolName ?? "An action is queued and needs your OK before it runs.",
             since: p.requestedAt ?? Date.now(),
+          });
+        }
+      } catch { /* ignore */ }
+      try {
+        const pendingQ = await window.electronAPI!.project.getPendingQuestion?.();
+        if (pendingQ && typeof pendingQ === "object") {
+          const requestedAtMs = Date.parse(pendingQ.requestedAt) || Date.now();
+          items.push({
+            id: pendingQ.id,
+            kind: "question",
+            title: "Agent is asking you a question",
+            description: pendingQ.question.slice(0, 240),
+            since: requestedAtMs,
           });
         }
       } catch { /* ignore */ }

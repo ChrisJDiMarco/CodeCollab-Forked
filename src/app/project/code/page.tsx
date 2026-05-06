@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 
 import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
@@ -11,6 +12,8 @@ import PromptCard from "@/components/prompt-card";
 import { nowTimestamp } from "@/lib/format-time";
 import { useStreamEvents } from "@/hooks/use-stream-events";
 import { RunInTerminalButton } from "@/components/run-in-terminal-button";
+import { QuestionCard } from "@/components/question-card";
+import type { AgentQuestion, ChatMode } from "@/lib/electron";
 import { buildPickerRows, effortLabel } from "@/lib/model-picker";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
@@ -84,6 +87,7 @@ interface SoloSession {
   createdAt: string;
   updatedAt: string;
   lastModel: string | null;
+  planId?: string;
   messages: Array<{
     id: string;
     from: string;
@@ -95,6 +99,8 @@ interface SoloSession {
     attachments?: string[];
     modelId?: string;
     checkpointId?: string | null;
+    planId?: string;
+    planTitle?: string;
   }>;
 }
 
@@ -191,8 +197,18 @@ function formatSessionTime(iso: string): string {
 /*  Page                                                               */
 /* ------------------------------------------------------------------ */
 export default function SoloChatPage() {
+  return (
+    <Suspense fallback={null}>
+      <SoloChatPageContent />
+    </Suspense>
+  );
+}
+
+function SoloChatPageContent() {
   const { activeProject } = useActiveDesktopProject();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const requestedSessionId = searchParams.get("session");
 
   /* --- state --- */
   const [sessions, setSessions] = useState<SoloSession[]>([]);
@@ -263,7 +279,38 @@ export default function SoloChatPage() {
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); };
 
   // Chat mode
-  const [chatMode, setChatMode] = useState<"agent" | "ask" | "plan">("agent");
+  const [chatMode, setChatMode] = useState<ChatMode>("agent");
+
+  // Save-as-plan tracking for AI messages in this solo chat
+  const [savingPlanFor, setSavingPlanFor] = useState<string | null>(null);
+  const [savedPlanForMessage, setSavedPlanForMessage] = useState<Record<string, { planId: string; title: string }>>({});
+
+  const handleSaveAsPlan = useCallback(async (msg: { id: string; text: string }) => {
+    if (!activeProject) return;
+    setSavingPlanFor(msg.id);
+    try {
+      const result = await window.electronAPI?.project?.savePlanFromChatMessage?.({
+        projectId: activeProject.id,
+        markdown: msg.text,
+        source: {
+          kind: "solo-chat",
+          chatId: activeSessionId || `solo-${activeProject.id}`,
+          messageId: msg.id,
+        },
+      });
+      if (result?.id) {
+        setSavedPlanForMessage((prev) => ({
+          ...prev,
+          [msg.id]: { planId: result.id, title: result.title },
+        }));
+        showToast("Saved as plan");
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not save plan");
+    } finally {
+      setSavingPlanFor(null);
+    }
+  }, [activeProject, activeSessionId]);
 
   // Diff view state
   const [diffFile, setDiffFile] = useState<string | null>(null);
@@ -340,16 +387,30 @@ export default function SoloChatPage() {
     [sessions, activeSessionId]
   );
 
+  /* --- plan-execution context for the active session --- */
+  const activePlan = useMemo(() => {
+    if (!activeSession?.planId || !activeProject) return null;
+    const dash = activeProject.dashboard as { plans?: unknown[] } | undefined;
+    const plans = Array.isArray(dash?.plans) ? dash.plans : [];
+    return (plans as Array<{ id: string; title: string; steps: Array<{ id: string; text: string; status: string }>; status: string }>)
+      .find((p) => p && p.id === activeSession.planId) ?? null;
+  }, [activeSession?.planId, activeProject]);
+
   /* --- sync sessions from project state --- */
   useEffect(() => {
     if (!activeProject) return;
-    // Skip session sync while generating to avoid duplicate messages:
-    // The streaming indicator renders live output, and the backend save would
-    // also add the response to the session, causing double-render.
-    if (isGenerating) return;
     const dash = activeProject.dashboard as Record<string, unknown>;
     const stored = Array.isArray(dash?.soloSessions) ? (dash.soloSessions as SoloSession[]) : [];
     setSessions(stored);
+    // If a specific session was requested via ?session=, open it.
+    if (requestedSessionId) {
+      const requested = stored.find((s) => s.id === requestedSessionId);
+      if (requested) {
+        setOpenTabIds((prev) => (prev.includes(requested.id) ? prev : [...prev, requested.id]));
+        setActiveSessionId(requested.id);
+        return;
+      }
+    }
     // If we have stored sessions but no open tabs, open the latest one
     if (stored.length > 0 && openTabIds.length === 0) {
       const latestId = stored[stored.length - 1].id;
@@ -433,13 +494,18 @@ export default function SoloChatPage() {
   /* --- streaming listener via useStreamEvents --- */
   useEffect(() => {
     if (!window.electronAPI?.project) return;
+    const stopStarted = window.electronAPI.project.onAgentStarted?.((event) => {
+      if (event.scope !== "solo-chat") return;
+      setIsGenerating(true);
+      liveStartStreaming();
+    });
     const stopOutput = window.electronAPI.project.onAgentOutput((event) => {
       if (event.scope !== "solo-chat") return;
       const chunk = event.chunk ?? "";
       if (chunk) liveProcessChunk(chunk);
     });
-    return () => { stopOutput(); };
-  }, [liveProcessChunk]);
+    return () => { stopStarted?.(); stopOutput(); };
+  }, [liveProcessChunk, liveStartStreaming]);
 
   /* --- P2P Peer Activity State --- */
   const [peerStreams, setPeerStreams] = useState<Record<string, { peerName: string; conversationId: string; scope: string; tokens: string; updatedAt: number; taskId?: string | null; taskName?: string | null; sessionId?: string | null; sessionTitle?: string | null }>>({});
@@ -547,18 +613,73 @@ export default function SoloChatPage() {
   /* --- Listen for agent completion to clear otherAgentActive blocking --- */
   useEffect(() => {
     if (!window.electronAPI?.project) return;
-    const clearOtherAgent = () => {
+    const handleCompleted = (event: { scope?: string }) => {
       setOtherAgentActive(null);
+      // For solo-chat events, finalize the live stream so the saved aiMessage
+      // can render in place of the live indicator. The handleSend path also
+      // does this in its finally block, but plan-execution kicks off the
+      // agent via setImmediate (no local await), so this listener is the
+      // only thing that clears state for that flow.
+      if (event?.scope === "solo-chat") {
+        void liveFinalize().then(() => {
+          setTimeout(() => {
+            setIsGenerating(false);
+            liveResetEvents();
+          }, 300);
+        });
+      }
     };
-    const stopCompleted = window.electronAPI.project.onAgentCompleted?.(clearOtherAgent);
-    const stopError = window.electronAPI.project.onAgentError?.(clearOtherAgent);
-    const stopCancelled = window.electronAPI.project.onAgentCancelled?.(clearOtherAgent);
+    const stopCompleted = window.electronAPI.project.onAgentCompleted?.(handleCompleted);
+    const stopError = window.electronAPI.project.onAgentError?.(handleCompleted);
+    const stopCancelled = window.electronAPI.project.onAgentCancelled?.(handleCompleted);
     return () => {
       stopCompleted?.();
       stopError?.();
       stopCancelled?.();
     };
-  }, []);
+  }, [liveFinalize, liveResetEvents]);
+
+  /* --- Solo chat: pending tool approvals + clarifying questions --- */
+  const [pendingApproval, setPendingApproval] = useState<{ toolName: string; toolInput: Record<string, unknown> } | null>(null);
+  const [pendingQuestion, setPendingQuestion] = useState<AgentQuestion | null>(null);
+  useEffect(() => {
+    if (!window.electronAPI?.project) return;
+    if (!activeProject) return;
+    const projectId = activeProject.id;
+    const stopApproval = window.electronAPI.project.onAgentApprovalRequest?.((event) => {
+      if (event.scope && event.scope !== "solo-chat") return;
+      if (event.projectId && event.projectId !== projectId) return;
+      setPendingApproval({ toolName: event.toolName, toolInput: event.toolInput });
+    });
+    const stopQuestion = window.electronAPI.project.onAgentQuestion?.((event) => {
+      if (event.question.scope !== "solo") return;
+      if (event.projectId && event.projectId !== projectId) return;
+      setPendingQuestion(event.question);
+    });
+    const stopResolved = window.electronAPI.project.onAgentQuestionResolved?.((event) => {
+      setPendingQuestion((prev) => (prev && prev.id === event.questionId ? null : prev));
+    });
+    // Reconcile on mount
+    void (async () => {
+      try {
+        const a = await window.electronAPI?.project?.getPendingApproval?.();
+        if (a && (!a.projectId || a.projectId === projectId) && (!a.scope || a.scope === "solo-chat")) {
+          setPendingApproval({ toolName: a.toolName, toolInput: a.toolInput });
+        }
+      } catch { /* ignore */ }
+      try {
+        const q = await window.electronAPI?.project?.getPendingQuestion?.();
+        if (q && q.scope === "solo" && (!q.projectId || q.projectId === projectId)) {
+          setPendingQuestion(q);
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => {
+      stopApproval?.();
+      stopQuestion?.();
+      stopResolved?.();
+    };
+  }, [activeProject?.id]);
 
   /* --- model menu dismiss on click outside --- */
   useEffect(() => {
@@ -875,6 +996,7 @@ export default function SoloChatPage() {
           sessionId: sid,
           prompt: fullPrompt,
           model: selectedModel !== "auto" ? selectedModel : undefined,
+          mode: chatMode,
         });
       }
     } catch (err) {
@@ -1160,6 +1282,48 @@ export default function SoloChatPage() {
                 </div>
               ) : (
                 <div className="mx-auto max-w-3xl space-y-5">
+                  {activePlan ? (
+                    <div className="rounded-2xl border border-violet-500/15 bg-gradient-to-br from-violet-500/[0.06] to-blue-500/[0.04] p-4 ring-1 ring-violet-500/10">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-violet-600 dark:text-violet-400">
+                            {activePlan.status === "completed" ? "Plan complete" : "Executing plan"}
+                          </span>
+                          <Link
+                            href={`/project/plans?id=${encodeURIComponent(activePlan.id)}`}
+                            className="truncate text-[12px] font-semibold theme-fg hover:text-violet-500"
+                          >
+                            {activePlan.title}
+                          </Link>
+                        </div>
+                        <span className="flex-shrink-0 text-[10px] font-medium theme-muted">
+                          {activePlan.steps.filter((s) => s.status === "done" || s.status === "skipped").length}
+                          {" / "}
+                          {activePlan.steps.length} steps
+                        </span>
+                      </div>
+                      <ol className="mt-3 space-y-1.5">
+                        {activePlan.steps.map((step, i) => {
+                          const isDone = step.status === "done";
+                          const isSkipped = step.status === "skipped";
+                          return (
+                            <li key={step.id} className="flex items-start gap-2 text-[12px]">
+                              <span className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
+                                isDone ? "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400"
+                                : isSkipped ? "bg-amber-500/20 text-amber-600 dark:text-amber-400"
+                                : "bg-black/[0.06] text-ink-muted dark:bg-white/[0.08] dark:text-[var(--muted)]"
+                              }`}>
+                                {isDone ? "✓" : isSkipped ? "↷" : i + 1}
+                              </span>
+                              <span className={`min-w-0 flex-1 ${isDone ? "line-through theme-muted" : isSkipped ? "italic theme-muted" : "theme-fg"}`}>
+                                {step.text}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    </div>
+                  ) : null}
                   {activeSession.messages.map((msg) => (
                     <div key={msg.id}>
                       {msg.isAI ? (
@@ -1208,6 +1372,35 @@ export default function SoloChatPage() {
                               </button>
                             </div>
                             ) : null}
+                            {(msg.planId || savedPlanForMessage[msg.id] || msg.text) ? (
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                {!msg.planId && !savedPlanForMessage[msg.id] && msg.text ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleSaveAsPlan({ id: msg.id, text: msg.text })}
+                                    disabled={savingPlanFor === msg.id}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 px-2.5 py-1.5 text-[10px] font-semibold text-violet-600 transition hover:bg-violet-500/20 disabled:opacity-50 dark:text-violet-300"
+                                  >
+                                    {savingPlanFor === msg.id ? "Saving…" : "Save as plan"}
+                                  </button>
+                                ) : null}
+                                {(msg.planId || savedPlanForMessage[msg.id]) ? (() => {
+                                  const linked = msg.planId
+                                    ? { planId: msg.planId, title: (msg.planTitle as string) || "Plan" }
+                                    : savedPlanForMessage[msg.id];
+                                  if (!linked) return null;
+                                  return (
+                                    <Link
+                                      href={`/project/plans?id=${encodeURIComponent(linked.planId)}`}
+                                      className="inline-flex items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 px-2.5 py-1.5 text-[10px] font-semibold text-violet-600 transition hover:bg-violet-500/20 dark:text-violet-300"
+                                    >
+                                      <span className="truncate">Plan: {linked.title}</span>
+                                      <span>→</span>
+                                    </Link>
+                                  );
+                                })() : null}
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                       ) : (
@@ -1251,6 +1444,7 @@ export default function SoloChatPage() {
                                 sessionId: activeSessionId,
                                 prompt: newText,
                                 model,
+                                mode: chatMode,
                               });
                             } catch (err) {
                               const errorMsg = {
@@ -1477,6 +1671,60 @@ export default function SoloChatPage() {
                       e.currentTarget.value = "";
                     }}
                   />
+                  {pendingApproval ? (
+                    <div className="border-b border-amber-500/20 bg-amber-500/8 px-3.5 py-2.5 dark:bg-amber-500/6">
+                      <div className="mb-1.5 flex items-center gap-1.5">
+                        <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">Approval required</span>
+                      </div>
+                      <p className="mb-2 text-[12px] font-medium theme-fg">
+                        <span className="font-mono text-[11px] text-amber-700 dark:text-amber-300">{pendingApproval.toolName}</span>
+                        {pendingApproval.toolInput && Object.keys(pendingApproval.toolInput).length > 0 ? (
+                          <span className="ml-1 text-[11px] theme-muted">
+                            — {Object.entries(pendingApproval.toolInput).map(([k, v]) => `${k}: ${String(v).slice(0, 60)}`).join(", ")}
+                          </span>
+                        ) : null}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPendingApproval(null);
+                            void window.electronAPI?.project?.approveToolCall?.({ approved: true });
+                          }}
+                          className="rounded-md bg-emerald-500/12 px-3 py-1 text-[12px] font-semibold text-emerald-700 transition hover:bg-emerald-500/20 dark:text-emerald-400"
+                        >
+                          Allow
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPendingApproval(null);
+                            void window.electronAPI?.project?.cancelActiveRequest?.();
+                          }}
+                          className="rounded-md bg-red-500/10 px-3 py-1 text-[12px] font-semibold text-red-600 transition hover:bg-red-500/20 dark:text-red-400"
+                        >
+                          Deny
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {pendingQuestion ? (
+                    <QuestionCard
+                      question={pendingQuestion}
+                      onAnswer={({ answer, optionId }) => {
+                        const q = pendingQuestion;
+                        setPendingQuestion(null);
+                        void window.electronAPI?.project?.answerAgentQuestion?.({ id: q.id, answer, optionId });
+                        // If the run already finished, feed the answer as the next prompt.
+                        if (!isGenerating) {
+                          setComposerText(answer);
+                          // Slight delay so React state settles before send picks it up.
+                          setTimeout(() => void handleSendMessage(), 0);
+                        }
+                      }}
+                      onDismiss={() => setPendingQuestion(null)}
+                    />
+                  ) : null}
                   {codeAttachedFiles.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
                       {codeAttachedFiles.map((f) => {

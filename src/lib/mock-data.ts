@@ -142,6 +142,60 @@ export interface BuildArtifact {
 export type BuildTaskStatus = "planned" | "building" | "review" | "done";
 export type AgentMode = "shared" | "new";
 
+// ─── Plans (v2 — flat, executable plans produced by plan-mode chats) ─────
+
+export type ChatMode = "plan" | "agent" | "ask";
+
+export type ProjectPlanStatus =
+  | "draft"
+  | "active"
+  | "executing"
+  | "completed"
+  | "archived";
+
+export type PlanStepStatus = "pending" | "running" | "done" | "skipped";
+
+export type PlanSourceKind = "pm-chat" | "task-chat" | "solo-chat" | "manual";
+
+export interface PlanStep {
+  id: string;
+  order: number;
+  text: string;
+  dependsOn?: string[];
+  parallelWith?: string[];
+  status: PlanStepStatus;
+}
+
+export interface PlanFileRef {
+  path: string;
+  note?: string;
+}
+
+export interface PlanSource {
+  kind: PlanSourceKind;
+  chatId?: string;
+  messageId?: string;
+}
+
+export interface ProjectPlan {
+  id: string;
+  projectId: string;
+  title: string;
+  status: ProjectPlanStatus;
+  tldr: string;
+  steps: PlanStep[];
+  relevantFiles: PlanFileRef[];
+  verification: string[];
+  decisions?: string[];
+  furtherConsiderations?: string[];
+  rawMarkdown?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  source: PlanSource;
+  executionChatId?: string | null;
+}
+
 export interface BuildPlanTask {
   id: string;
   title: string;
@@ -202,6 +256,8 @@ export interface Message {
   isAI?: boolean;
   isMine?: boolean;
   buildId?: string;
+  planId?: string;
+  planTitle?: string;
 }
 
 export interface TaskConversationThread {

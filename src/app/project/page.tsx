@@ -7,6 +7,7 @@ import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
 import ActivityStream from "@/components/activity-stream-v2";
 import { useStreamEvents } from "@/hooks/use-stream-events";
 import { RunInTerminalButton } from "@/components/run-in-terminal-button";
+import { PlansSection } from "@/components/plans-section";
 
 type BuildTaskStatus = "planned" | "building" | "review" | "done";
 
@@ -1922,6 +1923,15 @@ export default function ProjectPage() {
         {/* ═══════════════════ ACTION ITEMS ═══════════════════ */}
         {activeProject && (
           <ActionItemsSection projectId={activeProject.id} />
+        )}
+
+        {/* ═══════════════════ PLANS ═══════════════════ */}
+        {activeProject && (
+          <PlansSection
+            projectId={activeProject.id}
+            rawPlans={(activeProject.dashboard as { plans?: unknown[] })?.plans ?? []}
+            activePlanId={(activeProject.dashboard as { activePlanId?: string | null })?.activePlanId ?? null}
+          />
         )}
 
         {/* ═══════════════════ TASK TREE BY SUBPROJECT ═══════════════════ */}

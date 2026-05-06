@@ -15,6 +15,8 @@ function createDefaultDashboard(systemPromptMarkdown = "", initialPrompt = "") {
     channels: [],
     directMessages: [],
     soloSessions: [],
+    plans: [],
+    activePlanId: null,
   };
 }
 
@@ -41,6 +43,8 @@ type ActiveDesktopProject = {
     channels: unknown[];
     directMessages: unknown[];
     soloSessions?: { id: string; title: string; createdAt: string; updatedAt: string; lastModel: string | null; messages: { id: string; from: string; text: string; isAI?: boolean; isMine?: boolean }[] }[];
+    plans?: unknown[];
+    activePlanId?: string | null;
   };
 };
 
@@ -77,6 +81,8 @@ function normalizeActiveProject(project: Partial<ActiveDesktopProject> | null): 
       channels: Array.isArray(project.dashboard?.channels) ? project.dashboard.channels : [],
       directMessages: Array.isArray(project.dashboard?.directMessages) ? project.dashboard.directMessages : [],
       soloSessions: Array.isArray(project.dashboard?.soloSessions) ? project.dashboard.soloSessions : [],
+      plans: Array.isArray(project.dashboard?.plans) ? project.dashboard.plans : [],
+      activePlanId: project.dashboard?.activePlanId ?? null,
     },
   };
 }
@@ -116,6 +122,13 @@ export function useActiveDesktopProject() {
           p.updatedAt,
           JSON.stringify(p.dashboard.plan ?? null),
           (p.dashboard.taskThreads?.length ?? 0),
+          (p.dashboard.plans?.length ?? 0),
+          p.dashboard.activePlanId ?? "",
+          // include plan list updatedAt timestamps so renames/status changes invalidate
+          JSON.stringify((p.dashboard.plans ?? []).map((pl) => {
+            const plan = pl as { id?: string; updatedAt?: string; status?: string } | null;
+            return plan ? `${plan.id ?? ""}:${plan.updatedAt ?? ""}:${plan.status ?? ""}` : "";
+          })),
         ].join("|");
       } catch {
         return String(Math.random());

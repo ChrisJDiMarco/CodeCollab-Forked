@@ -134,6 +134,8 @@ function createDefaultDashboardState(systemPromptMarkdown, initialPrompt) {
     artifacts: [],
     channels: [],
     directMessages: [],
+    plans: [],
+    activePlanId: null,
   };
 }
 
@@ -154,6 +156,8 @@ function normalizeProject(project, systemPromptMarkdown) {
       artifacts: Array.isArray(project?.dashboard?.artifacts) ? project.dashboard.artifacts : [],
       channels: Array.isArray(project?.dashboard?.channels) ? project.dashboard.channels : [],
       directMessages: Array.isArray(project?.dashboard?.directMessages) ? project.dashboard.directMessages : [],
+      plans: Array.isArray(project?.dashboard?.plans) ? project.dashboard.plans : [],
+      activePlanId: typeof project?.dashboard?.activePlanId === "string" ? project.dashboard.activePlanId : null,
     },
   };
 }

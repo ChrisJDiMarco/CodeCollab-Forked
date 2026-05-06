@@ -262,6 +262,70 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
       } catch (err) {
         console.warn("[P2P-apply] ERROR:", err?.message);
       }
+    } else if (category === "plan-v2" && data?.plan?.id) {
+      // ── Plans v2: upsert into project.dashboard.plans (forward-only on status) ──
+      try {
+        const STATUS_ORDER_PLAN_V2 = { draft: 0, active: 1, executing: 2, completed: 3, archived: 4 };
+        let didChange = false;
+        const result = await settingsService.atomicUpdate((settings) => {
+          let projectIndex = settings.projects?.findIndex(p => p.id === projectId);
+          if (projectIndex < 0) projectIndex = settings.projects?.findIndex(p => p.id === data.projectId);
+          if (projectIndex < 0 || !settings.projects[projectIndex].dashboard) return undefined;
+          const dashboard = settings.projects[projectIndex].dashboard;
+          const plans = Array.isArray(dashboard.plans) ? [...dashboard.plans] : [];
+          const existingIdx = plans.findIndex(p => p && p.id === data.plan.id);
+          let nextPlan = { ...data.plan };
+          if (existingIdx >= 0) {
+            const local = plans[existingIdx];
+            const localOrder = STATUS_ORDER_PLAN_V2[local?.status] ?? 0;
+            const incomingOrder = STATUS_ORDER_PLAN_V2[nextPlan.status] ?? 0;
+            if (localOrder > incomingOrder) nextPlan.status = local.status;
+            plans[existingIdx] = nextPlan;
+          } else {
+            plans.push(nextPlan);
+          }
+          dashboard.plans = plans;
+          didChange = true;
+          return { ...settings };
+        });
+        if (didChange && result) sendEvent("settings:changed", result);
+      } catch (err) {
+        console.warn("[P2P-apply] plan-v2 sync error:", err?.message);
+      }
+    } else if (category === "plan-v2-deleted" && data?.planId) {
+      try {
+        let didChange = false;
+        const result = await settingsService.atomicUpdate((settings) => {
+          let projectIndex = settings.projects?.findIndex(p => p.id === projectId);
+          if (projectIndex < 0) projectIndex = settings.projects?.findIndex(p => p.id === data.projectId);
+          if (projectIndex < 0 || !settings.projects[projectIndex].dashboard) return undefined;
+          const dashboard = settings.projects[projectIndex].dashboard;
+          const plans = Array.isArray(dashboard.plans) ? dashboard.plans.filter(p => p && p.id !== data.planId) : [];
+          dashboard.plans = plans;
+          if (dashboard.activePlanId === data.planId) dashboard.activePlanId = null;
+          didChange = true;
+          return { ...settings };
+        });
+        if (didChange && result) sendEvent("settings:changed", result);
+      } catch (err) {
+        console.warn("[P2P-apply] plan-v2-deleted sync error:", err?.message);
+      }
+    } else if (category === "plan-v2-active") {
+      try {
+        let didChange = false;
+        const result = await settingsService.atomicUpdate((settings) => {
+          let projectIndex = settings.projects?.findIndex(p => p.id === projectId);
+          if (projectIndex < 0) projectIndex = settings.projects?.findIndex(p => p.id === data?.projectId);
+          if (projectIndex < 0 || !settings.projects[projectIndex].dashboard) return undefined;
+          const dashboard = settings.projects[projectIndex].dashboard;
+          dashboard.activePlanId = typeof data?.activePlanId === "string" ? data.activePlanId : null;
+          didChange = true;
+          return { ...settings };
+        });
+        if (didChange && result) sendEvent("settings:changed", result);
+      } catch (err) {
+        console.warn("[P2P-apply] plan-v2-active sync error:", err?.message);
+      }
     } else if (category === "tasks" && data?.taskId && data?.status) {
       // ── Task status sync: update task status on this machine ──
       try {
@@ -1421,6 +1485,48 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
     return { saved: true };
   });
 
+  // ─── Plans v2 (flat, executable plans) ─────────────────────────────────
+
+  safeHandle("project:listPlans", async (_event, projectId) => {
+    return projectService.listPlansV2({ projectId });
+  });
+
+  safeHandle("project:savePlanV2", async (_event, payload) => {
+    const result = await projectService.savePlanV2(payload);
+    sendEvent("settings:changed", await settingsService.readSettings());
+    return result;
+  });
+
+  safeHandle("project:deletePlanV2", async (_event, payload) => {
+    const result = await projectService.deletePlanV2(payload);
+    sendEvent("settings:changed", await settingsService.readSettings());
+    return result;
+  });
+
+  safeHandle("project:setActivePlan", async (_event, payload) => {
+    const result = await projectService.setActivePlan(payload);
+    sendEvent("settings:changed", await settingsService.readSettings());
+    return result;
+  });
+
+  safeHandle("project:archivePlan", async (_event, payload) => {
+    const result = await projectService.archivePlan(payload);
+    sendEvent("settings:changed", await settingsService.readSettings());
+    return result;
+  });
+
+  safeHandle("project:executePlan", async (_event, payload) => {
+    const result = await projectService.executePlan(payload);
+    sendEvent("settings:changed", await settingsService.readSettings());
+    return result;
+  });
+
+  safeHandle("project:savePlanFromChatMessage", async (_event, payload) => {
+    const result = await projectService.savePlanFromChatMessage(payload);
+    sendEvent("settings:changed", await settingsService.readSettings());
+    return result;
+  });
+
   safeHandle("project:generatePlan", async (_event, payload) => {
     if (fileWatcherService) fileWatcherService.setAgentActive(true);
     try {
@@ -1592,6 +1698,14 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
 
   safeHandle("project:getPendingApproval", async () => {
     return projectService.getPendingApproval();
+  });
+
+  safeHandle("project:getPendingQuestion", async () => {
+    return projectService.getPendingQuestion();
+  });
+
+  safeHandle("project:answerAgentQuestion", async (_event, payload) => {
+    return projectService.answerAgentQuestion(payload || {});
   });
 
   safeHandle("project:launchDevServer", async (_event, payload) => {
