@@ -522,7 +522,13 @@ function SoloChatPageContent() {
     const stopChatMessage = window.electronAPI.p2p.onChatMessage((event: { projectId?: string; peerId?: string }) => {
       if (event.projectId && event.projectId !== activeProject?.id) return;
       const peerId = event.peerId || "unknown";
-      setPeerStreams((prev) => { const next = { ...prev }; delete next[peerId]; return next; });
+      // Keep the timeline visible for a few seconds after the message arrives so
+      // users can review what the peer's agent did, especially for fast runs.
+      if (peerStreamTimeoutsRef.current[peerId]) clearTimeout(peerStreamTimeoutsRef.current[peerId]);
+      peerStreamTimeoutsRef.current[peerId] = setTimeout(() => {
+        setPeerStreams((prev) => { const next = { ...prev }; delete next[peerId]; return next; });
+        delete peerStreamTimeoutsRef.current[peerId];
+      }, 8000);
     });
 
     const stopPeerLeft = window.electronAPI.p2p.onPeerLeft((event: { projectId?: string; peerId?: string }) => {
@@ -1492,7 +1498,16 @@ function SoloChatPageContent() {
                   {/* P2P Peer Live Stream */}
                   {Object.entries(peerStreams).map(([peerId, stream]) => {
                     const isSoloChatStream = stream.scope === "solo-chat";
-                    const matchesSession = isSoloChatStream && stream.sessionId && stream.sessionId === activeSessionId;
+                    // Show the live timeline whenever a solo-chat stream is active. We used
+                    // to gate this on stream.sessionId === activeSessionId, but on the peer
+                    // machine activeSessionId may not match (race between auto-bind, tab
+                    // selection, and incoming tokens). The peer just wants to see the live
+                    // output for any solo-chat run on this project.
+                    const matchesSession = isSoloChatStream && (
+                      !stream.sessionId ||
+                      !activeSessionId ||
+                      stream.sessionId === activeSessionId
+                    );
 
                     if (!isSoloChatStream) {
                       // Non-freestyle stream: show "Agent running in X" banner
