@@ -489,11 +489,15 @@ function SoloChatPageContent() {
   const inputBlocked = isGenerating || peerIsActive || Boolean(otherAgentActive);
 
   /* --- P2P Peer stream listeners --- */
+  const activeProjectIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => { activeProjectIdRef.current = activeProject?.id; }, [activeProject?.id]);
+
   useEffect(() => {
     if (!window.electronAPI?.p2p) return;
 
     const stopChatToken = window.electronAPI.p2p.onChatToken((event: { projectId?: string; peerId?: string; peerName?: string; conversationId?: string; token?: string; scope?: string; taskId?: string; taskName?: string; sessionId?: string; sessionTitle?: string }) => {
-      if (event.projectId && event.projectId !== activeProject?.id) return;
+      const currentId = activeProjectIdRef.current;
+      if (event.projectId && currentId && event.projectId !== currentId) return;
       const peerId = event.peerId || "unknown";
       setPeerStreams((prev) => {
         const existing = prev[peerId];
@@ -520,7 +524,8 @@ function SoloChatPageContent() {
     });
 
     const stopChatMessage = window.electronAPI.p2p.onChatMessage((event: { projectId?: string; peerId?: string }) => {
-      if (event.projectId && event.projectId !== activeProject?.id) return;
+      const currentId = activeProjectIdRef.current;
+      if (event.projectId && currentId && event.projectId !== currentId) return;
       const peerId = event.peerId || "unknown";
       // Keep the timeline visible for a few seconds after the message arrives so
       // users can review what the peer's agent did, especially for fast runs.
@@ -532,7 +537,8 @@ function SoloChatPageContent() {
     });
 
     const stopPeerLeft = window.electronAPI.p2p.onPeerLeft((event: { projectId?: string; peerId?: string }) => {
-      if (event.projectId && event.projectId !== activeProject?.id) return;
+      const currentId = activeProjectIdRef.current;
+      if (event.projectId && currentId && event.projectId !== currentId) return;
       const peerId = event.peerId || "unknown";
       setPeerStreams((prev) => {
         if (!prev[peerId]) return prev;
@@ -544,9 +550,11 @@ function SoloChatPageContent() {
     });
 
     // Restore accumulated peer streams from main process (for reconnect after navigation)
+    // Note: This runs on mount only — see the dedicated effect below that re-runs
+    // when activeProject?.id resolves so we don't miss the initial restore.
     (async () => {
       try {
-        const streams = await (window as /* eslint-disable-next-line @typescript-eslint/no-explicit-any */ any).electronAPI?.p2p?.getActivePeerStreams?.({ projectId: activeProject?.id });
+        const streams = await (window as /* eslint-disable-next-line @typescript-eslint/no-explicit-any */ any).electronAPI?.p2p?.getActivePeerStreams?.({ projectId: activeProjectIdRef.current });
         if (streams && Object.keys(streams).length > 0) {
           setPeerStreams((prev: Record<string, { peerName: string; conversationId: string; scope: string; tokens: string; updatedAt: number; taskId?: string | null; taskName?: string | null; sessionId?: string | null; sessionTitle?: string | null }>) => {
             const merged = { ...prev };
@@ -567,6 +575,28 @@ function SoloChatPageContent() {
       peerStreamTimeoutsRef.current = {};
     };
   }, []);
+
+  /* --- Re-restore peer streams once the active project id resolves, so the
+         peer doesn't miss the in-flight stream when the page mounts before
+         the project context loads. */
+  useEffect(() => {
+    if (!activeProject?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const streams = await (window as /* eslint-disable-next-line @typescript-eslint/no-explicit-any */ any).electronAPI?.p2p?.getActivePeerStreams?.({ projectId: activeProject.id });
+        if (cancelled || !streams || Object.keys(streams).length === 0) return;
+        setPeerStreams((prev) => {
+          const merged = { ...prev };
+          for (const [peerId, acc] of Object.entries(streams) as [string, { peerName: string; conversationId: string; scope: string; tokens: string; updatedAt: number; taskId?: string | null; taskName?: string | null; sessionId?: string | null; sessionTitle?: string | null }][]) {
+            if (!merged[peerId]) merged[peerId] = { ...acc };
+          }
+          return merged;
+        });
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [activeProject?.id]);
 
   /* --- Auto-bind to a peer's active solo-chat session when the user has no
          session selected. Lets the invited machine see live output as soon as
