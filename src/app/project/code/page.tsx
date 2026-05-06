@@ -562,6 +562,21 @@ function SoloChatPageContent() {
     };
   }, []);
 
+  /* --- Auto-bind to a peer's active solo-chat session when the user has no
+         session selected. Lets the invited machine see live output as soon as
+         the peer's agent starts streaming, even without clicking a plan link. */
+  useEffect(() => {
+    if (activeSessionId || requestedSessionId) return;
+    const peerSoloStream = Object.values(peerStreams).find(
+      (s) => s.scope === "solo-chat" && typeof s.sessionId === "string" && s.sessionId,
+    );
+    if (peerSoloStream?.sessionId) {
+      const sid = peerSoloStream.sessionId;
+      setOpenTabIds((prev) => (prev.includes(sid) ? prev : [...prev, sid]));
+      setActiveSessionId(sid);
+    }
+  }, [peerStreams, activeSessionId, requestedSessionId]);
+
   /* --- Reconnect to active solo-chat on mount, or detect other-scope agent --- */
   useEffect(() => {
     if (!activeProject) return;

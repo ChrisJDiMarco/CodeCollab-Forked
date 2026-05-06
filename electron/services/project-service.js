@@ -1364,6 +1364,11 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       if (p2pService && typeof p2pService.broadcastChatToken === "function") {
         const projectId = requestMeta?.projectId || "unknown";
         const conversationId = requestMeta?.threadId || requestMeta?.taskId || requestMeta?.scope || "unknown";
+        // Light diagnostic so we can confirm tokens are being pushed (only on first non-empty token).
+        if (text && !requestMeta?.__loggedFirstToken) {
+          try { console.log(`[P2P-broadcast] chat-token scope=${requestMeta?.scope} sessionId=${requestMeta?.sessionId || "-"} bytes=${text.length}`); } catch {}
+          requestMeta.__loggedFirstToken = true;
+        }
         p2pService.broadcastChatToken(projectId, conversationId, text, requestMeta?.scope || "unknown", {
           taskId: requestMeta?.taskId || null,
           taskName: requestMeta?.taskName || null,
@@ -1825,7 +1830,14 @@ function createProjectService({ app, settingsService, toolingService, p2pService
         return await runProgram(retry.cli, retry.args, cwd, requestMeta, retry.stdinData || null, retry.streamJson || false, retry.copilotJson || false, retry.codexJson || false, retry.manualApproval || false);
       }
       const classified = classifyAgentError(err, provider, cli);
-      throw classified || err;
+      if (classified) {
+        // Preserve original error properties so callers can recover partial output.
+        if (err.stdout != null) classified.stdout = err.stdout;
+        if (err.stderr != null) classified.stderr = err.stderr;
+        if (err.exitCode != null) classified.exitCode = err.exitCode;
+        throw classified;
+      }
+      throw err;
     }
   }
 
@@ -3924,8 +3936,12 @@ function createProjectService({ app, settingsService, toolingService, p2pService
         promptText: prompt.trim(),
       });
     } catch (programError) {
-      rawOutput = programError.stdout?.trim() || "";
+      // Recover any partial readable output from the failed run so the user
+      // (and the peer) still see what the agent produced before crashing.
+      const partial = (programError?.stdout?.trim() || activeRequestOutput?.trim() || "").trim();
+      rawOutput = partial;
       if (!rawOutput) throw programError;
+      console.warn(`[solo-chat] provider error recovered: "${programError?.message?.slice(0, 80)}" — saving ${rawOutput.length}b of partial output`);
     }
 
     const responseText = rawOutput.trim() || "No response returned.";
@@ -5463,6 +5479,25 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       fresh.projects[idx].dashboard = { ...dashboard, soloSessions: sessions, plans };
       return { ...fresh };
     });
+
+    // Broadcast the new solo session + updated plan to peers immediately so
+    // the invited machine can show "Go to live agent" and bind incoming tokens
+    // to this session id without waiting for the final state-sync.
+    try {
+      const fresh = await settingsService.readSettings();
+      const proj = (fresh.projects ?? []).find((p) => p.id === projectId);
+      const newSession = (proj?.dashboard?.soloSessions ?? []).find((s) => s.id === sessionId);
+      const updatedPlan = (proj?.dashboard?.plans ?? []).find((p) => p && p.id === plan.id);
+      const payload = {};
+      if (newSession) payload.soloSessions = [newSession];
+      if (updatedPlan) payload.plans = [updatedPlan];
+      if (Object.keys(payload).length > 0) {
+        broadcastStateToP2P(projectId, "thread-sync", `exec-${sessionId}`, payload);
+        if (updatedPlan) broadcastStateToP2P(projectId, "plan-v2", updatedPlan.id, { plan: updatedPlan, projectId });
+      }
+    } catch (err) {
+      console.warn(`[executePlan] peer-sync broadcast failed: ${err?.message || err}`);
+    }
 
     // Fire-and-forget: kick off the agent so the UI can navigate immediately.
     // Errors surface through the regular agent event stream and conversation.
