@@ -15,6 +15,7 @@ import { RunInTerminalButton } from "@/components/run-in-terminal-button";
 import { QuestionCard } from "@/components/question-card";
 import type { AgentQuestion, ChatMode } from "@/lib/electron";
 import { buildPickerRows, effortLabel } from "@/lib/model-picker";
+import ProjectPreviewPage from "@/app/project/preview/page";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
@@ -251,7 +252,7 @@ function SoloChatPageContent() {
   const [providerTab, setProviderTab] = useState<"claude" | "copilot" | "codex">("copilot");
 
   // Right panel
-  const [rightPanel, setRightPanel] = useState<"files" | "terminal" | "changes" | null>(null);
+  const [rightPanel, setRightPanel] = useState<"files" | "terminal" | "changes" | "preview" | null>(null);
   const [rightPanelWidth, setRightPanelWidth] = useState(420);
   const [fileTree, setFileTree] = useState<FileTreeEntry[]>([]);
   const [fileTreePath, setFileTreePath] = useState<string[]>([]);
@@ -1129,7 +1130,8 @@ function SoloChatPageContent() {
   };
 
   const handleOpenPreview = () => {
-    router.push("/project/preview");
+    setRightPanel("preview");
+    setRightPanelWidth((current) => Math.max(current, 520));
   };
 
   const handleOpenInVSCode = async () => {
@@ -1290,6 +1292,14 @@ function SoloChatPageContent() {
               <path d="M2.5 4A1.5 1.5 0 004 5.5H7.879a1.5 1.5 0 001.06-.44l1.122-1.12A1.5 1.5 0 0111.121 3.5H16A1.5 1.5 0 0117.5 5v1.5a.75.75 0 01-1.5 0V5H11.121l-1.122 1.12A3 3 0 017.879 7H4v8h4.75a.75.75 0 010 1.5H4A1.5 1.5 0 012.5 15V4z" />
               <path d="M12.22 9.47a.75.75 0 011.06 0l2.5 2.5a.75.75 0 010 1.06l-2.5 2.5a.75.75 0 11-1.06-1.06l1.22-1.22H9.75a.75.75 0 010-1.5h3.69l-1.22-1.22a.75.75 0 010-1.06z" />
             </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => { setRightPanel(rightPanel === "preview" ? null : "preview"); setRightPanelWidth((current) => Math.max(current, 520)); }}
+            title="Live preview"
+            className={`flex h-8 w-8 items-center justify-center rounded-lg transition ${rightPanel === "preview" ? "bg-black/[0.06] text-ink dark:bg-white/[0.1] dark:text-[var(--fg)]" : "text-ink-muted/60 hover:bg-black/[0.04] hover:text-ink dark:text-[var(--muted)] dark:hover:bg-white/[0.06]"}`}
+          >
+            <PreviewIcon className="h-4 w-4" />
           </button>
           <button
             type="button"
@@ -2114,6 +2124,10 @@ function SoloChatPageContent() {
                       </pre>
                     </div>
                   ) : null}
+                </div>
+              ) : rightPanel === "preview" ? (
+                <div className="relative flex min-h-0 flex-1 overflow-hidden">
+                  <ProjectPreviewPage />
                 </div>
               ) : rightPanel === "terminal" ? (
                 <>
