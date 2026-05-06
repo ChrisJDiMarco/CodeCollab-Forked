@@ -194,11 +194,11 @@ type ActionItem = {
   taskName?: string;
 };
 
-const categoryIcon: Record<ActionItem["category"], { bg: string; icon: string }> = {
-  setup: { bg: "bg-blue-500/15 text-blue-400", icon: "⚙" },
-  config: { bg: "bg-amber-500/15 text-amber-400", icon: "🔑" },
-  deploy: { bg: "bg-emerald-500/15 text-emerald-400", icon: "🚀" },
-  manual: { bg: "bg-purple-500/15 text-purple-400", icon: "📋" },
+const categoryIcon: Record<ActionItem["category"], { bg: string; icon: string; label: string }> = {
+  setup: { bg: "bg-blue-500/10 text-blue-500 ring-blue-500/20", icon: "ST", label: "Setup" },
+  config: { bg: "bg-amber-500/10 text-amber-500 ring-amber-500/20", icon: "CF", label: "Config" },
+  deploy: { bg: "bg-emerald-500/10 text-emerald-500 ring-emerald-500/20", icon: "DP", label: "Deploy" },
+  manual: { bg: "bg-violet-500/10 text-violet-500 ring-violet-500/20", icon: "MN", label: "Manual" },
 };
 
 /* ─── markdown renderer for help responses ─── */
@@ -300,8 +300,7 @@ function ActionItemsSection({ projectId }: { projectId: string }) {
   const [helpStreaming, setHelpStreaming] = useState<string | null>(null);
   const [chatInputs, setChatInputs] = useState<Record<string, string>>({});
   const [chatHistories, setChatHistories] = useState<Record<string, Array<{ role: "user" | "agent"; text: string }>>>({});
-  const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
-  const [confirmingDoneId, setConfirmingDoneId] = useState<string | null>(null);
+  const [actionItemsExpanded, setActionItemsExpanded] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newItemTitle, setNewItemTitle] = useState("");
   const [newItemDesc, setNewItemDesc] = useState("");
@@ -313,6 +312,7 @@ function ActionItemsSection({ projectId }: { projectId: string }) {
   const [isCheckingItems, setIsCheckingItems] = useState(false);
 
   const handleCheckForItems = async () => {
+    setActionItemsExpanded(true);
     if (!window.electronAPI?.project?.sendSoloMessage) return;
     setIsCheckingItems(true);
     scanStreamRef.current = "";
@@ -366,20 +366,13 @@ function ActionItemsSection({ projectId }: { projectId: string }) {
     setIsCheckingItems(false);
   };
 
-  const visibleItems = items.filter((i) => !removedIds.has(i.id));
+  const visibleItems = items;
   const completedCount = visibleItems.filter((i) => i.completed).length;
   const totalCount = visibleItems.length;
   const allDone = totalCount > 0 && completedCount === totalCount;
 
   const toggleComplete = (id: string) => {
     setItems((cur) => cur.map((i) => (i.id === id ? { ...i, completed: !i.completed } : i)));
-  };
-
-  const markDoneAndRemove = (id: string) => {
-    setItems((cur) => cur.map((i) => (i.id === id ? { ...i, completed: true } : i)));
-    setRemovedIds((cur) => new Set(cur).add(id));
-    if (expandedItem === id) setExpandedItem(null);
-    setConfirmingDoneId(null);
   };
 
   const handleAddItem = () => {
@@ -400,6 +393,17 @@ function ActionItemsSection({ projectId }: { projectId: string }) {
     setNewItemCategory("manual");
     setNewItemTask("");
     setShowAddForm(false);
+    setActionItemsExpanded(true);
+  };
+
+  const toggleAddForm = () => {
+    setActionItemsExpanded(true);
+    setShowAddForm((open) => !open);
+  };
+
+  const cancelAddForm = () => {
+    setShowAddForm(false);
+    if (totalCount === 0 && !isCheckingItems) setActionItemsExpanded(false);
   };
 
   // Listen for streaming output when help is loading
@@ -473,136 +477,120 @@ function ActionItemsSection({ projectId }: { projectId: string }) {
     setHelpStreaming(null);
   };
 
+  const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+  if (!actionItemsExpanded && totalCount === 0 && !showAddForm && !isCheckingItems) {
+    return (
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={handleCheckForItems}
+          className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-black/[0.06] bg-white/75 px-3 text-[11px] font-semibold theme-muted shadow-[0_6px_18px_rgba(20,18,15,0.035)] transition hover:border-amber-500/30 hover:bg-amber-500/[0.04] hover:text-amber-600 dark:border-white/[0.08] dark:bg-white/[0.04] dark:hover:text-amber-400"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+            <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clipRule="evenodd" />
+          </svg>
+          Check action items
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <section>
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <h2 className="text-[16px] font-bold tracking-tight theme-fg">Action Items</h2>
-            <span className="rounded-full bg-black/[0.04] px-2.5 py-0.5 text-[10px] font-bold theme-muted dark:bg-white/[0.06]">
+    <section className="rounded-2xl border border-black/[0.06] bg-white/[0.55] px-3 py-3 shadow-[0_8px_22px_rgba(20,18,15,0.04)] dark:border-white/[0.08] dark:bg-white/[0.03]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 className="text-[13px] font-bold tracking-tight theme-fg">Action Items</h2>
+            <span className="rounded-full bg-black/[0.04] px-2 py-0.5 text-[9.5px] font-bold theme-muted dark:bg-white/[0.06]">
               {completedCount}/{totalCount}
             </span>
+            {allDone ? <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9.5px] font-bold text-emerald-500">Done</span> : null}
           </div>
-          <p className="mt-1 text-[12px] theme-muted">Things the AI cannot do for you — API keys, manual config, and one-time setup steps.</p>
+          <p className="mt-0.5 text-[11px] theme-muted">Manual setup, keys, deploy checks, and account steps.</p>
         </div>
-        <div className="flex items-center gap-2">
-          {allDone ? (
-            <span className="rounded-full bg-emerald-500/15 px-3 py-1.5 text-[10px] font-bold text-emerald-400">
-              All done ✓
-            </span>
-          ) : null}
+        <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={handleCheckForItems}
             disabled={isCheckingItems}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-black/[0.06] bg-white/80 px-3 py-2 text-[11px] font-semibold text-ink-muted transition hover:border-amber-500/30 hover:bg-amber-500/5 hover:text-amber-600 disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--muted)] dark:hover:border-amber-500/30 dark:hover:text-amber-400"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-black/[0.06] bg-white/70 px-2.5 text-[10px] font-semibold theme-muted transition hover:border-amber-500/30 hover:bg-amber-500/5 hover:text-amber-600 disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:hover:text-amber-400"
           >
             {isCheckingItems ? (
-              <svg className="h-3.5 w-3.5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <svg className="h-3 w-3 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
-                <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z" clipRule="evenodd" />
-              </svg>
-            )}
-            {isCheckingItems ? "Scanning…" : "Check for items"}
+            ) : null}
+            {isCheckingItems ? "Scanning" : "Scan"}
           </button>
           <button
             type="button"
-            onClick={() => setShowAddForm(!showAddForm)}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-black/[0.06] bg-white/80 px-3 py-2 text-[11px] font-semibold text-ink-muted transition hover:border-violet-500/30 hover:bg-violet-500/5 hover:text-violet-500 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[var(--muted)] dark:hover:border-violet-500/30 dark:hover:text-violet-400"
+            onClick={toggleAddForm}
+            className="inline-flex h-8 items-center gap-1 rounded-lg border border-black/[0.06] bg-white/70 px-2.5 text-[10px] font-semibold theme-muted transition hover:border-violet-500/30 hover:bg-violet-500/5 hover:text-violet-500 dark:border-white/[0.08] dark:bg-white/[0.04] dark:hover:text-violet-400"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
-              <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
-            </svg>
-            Add Item
+            <span className="text-[13px] leading-none">+</span>
+            Add
           </button>
         </div>
       </div>
 
-      {/* Add item form */}
-      {showAddForm ? (
-        <div className="mt-4 overflow-hidden rounded-2xl app-surface shadow-[var(--shadow-card)] ring-1 ring-violet-500/20">
-          <div className="border-b border-black/[0.04] bg-violet-500/[0.04] px-4 py-3 dark:border-white/[0.04]">
-            <p className="text-[12px] font-semibold theme-fg">New Action Item</p>
-            <p className="text-[10px] theme-muted mt-0.5">Add a step you need to complete manually — something the AI can&apos;t do.</p>
-          </div>
-          <div className="space-y-3 px-4 py-4">
-            <div>
-              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] theme-muted">Title</label>
-              <input
-                value={newItemTitle}
-                onChange={(e) => setNewItemTitle(e.target.value)}
-                placeholder="e.g. Add Stripe API key"
-                className="w-full rounded-xl border border-black/[0.06] bg-white/80 px-3 py-2.5 text-[13px] theme-fg outline-none placeholder:theme-muted focus:border-violet-500/40 focus:ring-2 focus:ring-violet-500/10 dark:border-white/[0.08] dark:bg-white/[0.04]"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] theme-muted">Description (optional)</label>
-              <input
-                value={newItemDesc}
-                onChange={(e) => setNewItemDesc(e.target.value)}
-                placeholder="Brief description of what needs to be done"
-                className="w-full rounded-xl border border-black/[0.06] bg-white/80 px-3 py-2.5 text-[13px] theme-fg outline-none placeholder:theme-muted focus:border-violet-500/40 focus:ring-2 focus:ring-violet-500/10 dark:border-white/[0.08] dark:bg-white/[0.04]"
-              />
-            </div>
-            <div className="flex gap-3">
-              <div className="flex-1">
-                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] theme-muted">Related Task (optional)</label>
-                <input
-                  value={newItemTask}
-                  onChange={(e) => setNewItemTask(e.target.value)}
-                  placeholder="e.g. Payment Integration"
-                  className="w-full rounded-xl border border-black/[0.06] bg-white/80 px-3 py-2.5 text-[13px] theme-fg outline-none placeholder:theme-muted focus:border-violet-500/40 focus:ring-2 focus:ring-violet-500/10 dark:border-white/[0.08] dark:bg-white/[0.04]"
-                />
-              </div>
-              <div className="w-[140px]">
-                <label className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] theme-muted">Category</label>
-                <select
-                  value={newItemCategory}
-                  onChange={(e) => setNewItemCategory(e.target.value as ActionItem["category"])}
-                  className="w-full rounded-xl border border-black/[0.06] bg-white/80 px-3 py-2.5 text-[13px] theme-fg outline-none focus:border-violet-500/40 focus:ring-2 focus:ring-violet-500/10 dark:border-white/[0.08] dark:bg-white/[0.04]"
-                >
-                  <option value="config">Config</option>
-                  <option value="setup">Setup</option>
-                  <option value="deploy">Deploy</option>
-                  <option value="manual">Manual</option>
-                </select>
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-2 pt-1">
-              <button type="button" onClick={() => setShowAddForm(false)} className="rounded-xl px-3 py-2 text-[11px] font-semibold theme-muted transition hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">Cancel</button>
-              <button type="button" onClick={handleAddItem} disabled={!newItemTitle.trim()} className="rounded-xl bg-[#111214] px-4 py-2 text-[11px] font-semibold text-[#f4efe6] transition hover:bg-[#0b1220] disabled:opacity-40 dark:bg-white dark:text-[#111214] dark:hover:bg-white/90">Add Item</button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Progress bar */}
       {totalCount > 0 ? (
-        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.06]">
-          <div
-            className="h-full rounded-full bg-gradient-to-r from-[#a78bfa] to-[#34d399] transition-all duration-500"
-            style={{ width: `${Math.round((completedCount / totalCount) * 100)}%` }}
-          />
+        <div className="mt-2 flex items-center gap-2">
+          <div className="h-1 flex-1 overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.06]">
+            <div className="h-full rounded-full bg-gradient-to-r from-violet-400 to-emerald-400 transition-all duration-500" style={{ width: `${progressPct}%` }} />
+          </div>
+          <span className="text-[10px] font-semibold theme-muted">{progressPct}%</span>
         </div>
       ) : null}
 
-      {/* Empty state */}
+      {showAddForm ? (
+        <div className="mt-3 rounded-xl border border-violet-500/15 bg-violet-500/[0.035] p-3">
+          <div className="grid gap-2 md:grid-cols-[1fr_1fr_120px]">
+            <input
+              value={newItemTitle}
+              onChange={(e) => setNewItemTitle(e.target.value)}
+              placeholder="Action item title"
+              className="h-9 rounded-lg border border-black/[0.06] bg-white/80 px-3 text-[12px] theme-fg outline-none placeholder:theme-muted focus:border-violet-500/40 focus:ring-2 focus:ring-violet-500/10 dark:border-white/[0.08] dark:bg-white/[0.04]"
+            />
+            <input
+              value={newItemDesc}
+              onChange={(e) => setNewItemDesc(e.target.value)}
+              placeholder="Short note (optional)"
+              className="h-9 rounded-lg border border-black/[0.06] bg-white/80 px-3 text-[12px] theme-fg outline-none placeholder:theme-muted focus:border-violet-500/40 focus:ring-2 focus:ring-violet-500/10 dark:border-white/[0.08] dark:bg-white/[0.04]"
+            />
+            <select
+              value={newItemCategory}
+              onChange={(e) => setNewItemCategory(e.target.value as ActionItem["category"])}
+              className="h-9 rounded-lg border border-black/[0.06] bg-white/80 px-2 text-[12px] theme-fg outline-none focus:border-violet-500/40 focus:ring-2 focus:ring-violet-500/10 dark:border-white/[0.08] dark:bg-white/[0.04]"
+            >
+              <option value="config">Config</option>
+              <option value="setup">Setup</option>
+              <option value="deploy">Deploy</option>
+              <option value="manual">Manual</option>
+            </select>
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <input
+              value={newItemTask}
+              onChange={(e) => setNewItemTask(e.target.value)}
+              placeholder="Related task (optional)"
+              className="h-8 min-w-0 flex-1 rounded-lg border border-black/[0.06] bg-white/70 px-3 text-[11px] theme-fg outline-none placeholder:theme-muted focus:border-violet-500/40 focus:ring-2 focus:ring-violet-500/10 dark:border-white/[0.08] dark:bg-white/[0.04]"
+            />
+            <button type="button" onClick={cancelAddForm} className="h-8 rounded-lg px-2.5 text-[10px] font-semibold theme-muted transition hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">Cancel</button>
+            <button type="button" onClick={handleAddItem} disabled={!newItemTitle.trim()} className="h-8 rounded-lg bg-[#111214] px-3 text-[10px] font-semibold text-[#f4efe6] transition hover:bg-[#0b1220] disabled:opacity-40 dark:bg-white dark:text-[#111214] dark:hover:bg-white/90">Add</button>
+          </div>
+        </div>
+      ) : null}
+
       {totalCount === 0 && !showAddForm ? (
-        <div className="mt-6 flex flex-col items-center justify-center rounded-2xl border border-dashed border-black/[0.08] bg-black/[0.015] px-6 py-10 text-center dark:border-white/[0.08] dark:bg-white/[0.015]">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/10 text-[20px]">🔍</div>
-          <p className="mt-3 text-[14px] font-semibold theme-fg">No action items yet</p>
-          <p className="mt-1 max-w-sm text-[12px] leading-relaxed theme-muted">
-            Click <strong>Check for items</strong> to scan your project for things that need manual setup — API keys, environment configuration, and more.
-          </p>
+        <div className="mt-3 rounded-xl border border-black/[0.06] bg-black/[0.015] px-3 py-2 text-[11px] theme-muted dark:border-white/[0.08] dark:bg-white/[0.015]">
+          {isCheckingItems ? "Scanning for manual setup steps..." : "No action items found yet. Scan again or add one manually."}
         </div>
       ) : null}
 
-      {/* Items */}
-      <div className="mt-4 space-y-2">
+      {totalCount > 0 ? (
+      <div className="mt-3 overflow-hidden rounded-xl border border-black/[0.06] bg-white/[0.45] dark:border-white/[0.08] dark:bg-white/[0.02]">
         {visibleItems.map((item) => {
           const cat = categoryIcon[item.category];
           const isExpanded = expandedItem === item.id;
@@ -610,24 +598,17 @@ function ActionItemsSection({ projectId }: { projectId: string }) {
           const isStreaming = helpLoading === item.id;
           const chatHistory = chatHistories[item.id] ?? [];
           return (
-            <div
-              key={item.id}
-              className={`overflow-hidden rounded-2xl transition-all ${
-                item.completed
-                  ? "opacity-60"
-                  : "app-surface shadow-[var(--shadow-card)] ring-1 ring-black/[0.06] dark:ring-white/[0.08]"
-              }`}
-            >
-              <div className="flex items-center gap-3 px-4 py-3.5">
-                {/* Checkbox */}
+            <div key={item.id} className={`border-b border-black/[0.05] last:border-b-0 transition ${item.completed ? "bg-black/[0.015] opacity-65 dark:bg-white/[0.015]" : "hover:bg-black/[0.018] dark:hover:bg-white/[0.025]"}`}>
+              <div className="flex items-center gap-2.5 px-3 py-2.5">
                 <button
                   type="button"
                   onClick={() => toggleComplete(item.id)}
-                  className={`flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border-2 transition ${
+                  className={`flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full border transition ${
                     item.completed
                       ? "border-emerald-500 bg-emerald-500 text-white"
-                      : "border-black/[0.15] hover:border-black/[0.25] dark:border-white/[0.15] dark:hover:border-white/[0.25]"
+                      : "border-black/[0.18] hover:border-emerald-500/50 dark:border-white/[0.18] dark:hover:border-emerald-400/50"
                   }`}
+                  aria-label={item.completed ? "Mark action item incomplete" : "Mark action item complete"}
                 >
                   {item.completed ? (
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3 w-3">
@@ -636,76 +617,50 @@ function ActionItemsSection({ projectId }: { projectId: string }) {
                   ) : null}
                 </button>
 
-                {/* Category icon */}
-                <span className={`flex h-7 w-7 items-center justify-center rounded-lg text-[12px] ${cat.bg}`}>
+                <span className={`flex h-6 w-6 items-center justify-center rounded-md text-[8.5px] font-black ring-1 ${cat.bg}`} title={cat.label}>
                   {cat.icon}
                 </span>
 
-                {/* Text */}
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <p className={`text-[13px] font-semibold ${item.completed ? "line-through theme-muted" : "theme-fg"}`}>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <p className={`truncate text-[12px] font-semibold ${item.completed ? "line-through theme-muted" : "theme-fg"}`}>
                       {item.title}
                     </p>
                     {item.taskName ? (
-                      <span className="rounded-md bg-violet-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-violet-400">
+                      <span className="flex-shrink-0 rounded-md bg-violet-500/10 px-1.5 py-0.5 text-[8.5px] font-semibold text-violet-500">
                         {item.taskName}
                       </span>
                     ) : null}
                   </div>
+                  {item.description ? <p className="mt-0.5 truncate text-[10.5px] theme-muted">{item.description}</p> : null}
                 </div>
 
-                {/* Actions */}
-                {!item.completed ? (
-                  <div className="flex items-center gap-1.5">
+                <div className="flex flex-shrink-0 items-center gap-1">
+                  {!item.completed ? (
+                    <>
                     {!hasResponse && !isStreaming ? (
                       <button
                         type="button"
                         onClick={() => void handleAskForHelp(item)}
                         disabled={isStreaming}
-                        className="rounded-lg bg-violet-500/10 px-2.5 py-1.5 text-[10px] font-semibold text-violet-400 transition hover:bg-violet-500/20 disabled:opacity-50"
+                        className="rounded-md bg-violet-500/10 px-2 py-1 text-[9.5px] font-semibold text-violet-500 transition hover:bg-violet-500/20 disabled:opacity-50"
                       >
-                        How do I do this?
+                        Help
                       </button>
                     ) : null}
-                    {confirmingDoneId === item.id ? (
-                      <div className="flex items-center gap-1.5 animate-in fade-in">
-                        <button
-                          type="button"
-                          onClick={() => markDoneAndRemove(item.id)}
-                          className="rounded-lg bg-emerald-500/20 px-3 py-1.5 text-[10px] font-semibold text-emerald-400 ring-1 ring-emerald-500/30 transition hover:bg-emerald-500/30"
-                        >
-                          Confirm done
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmingDoneId(null)}
-                          className="rounded-lg bg-black/[0.04] px-2.5 py-1.5 text-[10px] font-semibold theme-muted transition hover:bg-black/[0.08] dark:bg-white/[0.06] dark:hover:bg-white/[0.1]"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmingDoneId(item.id)}
-                        title="Mark done & remove"
-                        className="rounded-lg border border-black/[0.06] bg-black/[0.02] px-2.5 py-1.5 text-[10px] font-semibold theme-muted transition hover:border-emerald-500/30 hover:bg-emerald-500/5 hover:text-emerald-400 dark:border-white/[0.06] dark:bg-white/[0.02] dark:hover:border-emerald-500/30"
-                      >
-                        Done
-                      </button>
-                    )}
+                    </>
+                  ) : null}
                     <button
                       type="button"
                       onClick={() => setExpandedItem(isExpanded ? null : item.id)}
-                      className="flex h-7 w-7 items-center justify-center rounded-lg theme-muted transition hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                      className="flex h-6 w-6 items-center justify-center rounded-md theme-muted transition hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                      aria-label={isExpanded ? "Collapse action item" : "Expand action item"}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`h-3.5 w-3.5 transition ${isExpanded ? "rotate-180" : ""}`}>
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`h-3 w-3 transition ${isExpanded ? "rotate-180" : ""}`}>
                         <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
                       </svg>
                     </button>
-                  </div>
-                ) : null}
+                </div>
               </div>
 
               {/* Expanded details + help + chat */}
@@ -794,6 +749,7 @@ function ActionItemsSection({ projectId }: { projectId: string }) {
           );
         })}
       </div>
+      ) : null}
     </section>
   );
 }

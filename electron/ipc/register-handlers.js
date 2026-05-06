@@ -153,6 +153,89 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
     activityService.addEvent(event);
   };
 
+  const PLAN_V2_STATUS_ORDER = { draft: 0, active: 1, executing: 2, completed: 3, archived: 4 };
+  const PLAN_STEP_STATUS_ORDER = { pending: 0, running: 1, skipped: 2, done: 3 };
+  const planV2StatusRank = (status) => PLAN_V2_STATUS_ORDER[status] ?? 0;
+  const planStepStatusRank = (status) => PLAN_STEP_STATUS_ORDER[status] ?? 0;
+
+  const makeRemotePlanExecutionSession = (plan, peerName) => {
+    const now = new Date().toISOString();
+    const stepLines = Array.isArray(plan?.steps)
+      ? plan.steps.slice(0, 20).map((step, index) => {
+        const status = step?.status ? ` [${step.status}]` : "";
+        return `${index + 1}. ${step?.text || "Plan step"}${status}`;
+      })
+      : [];
+
+    const text = [
+      `# ${plan?.title || "Plan execution"}`,
+      "",
+      `This plan execution was started by ${peerName || "another collaborator"}. The plan and step state are synced here as updates arrive.`,
+      plan?.tldr ? `\n${plan.tldr}` : null,
+      stepLines.length ? "\n## Synced Steps" : null,
+      ...stepLines,
+    ].filter(Boolean).join("\n");
+
+    return {
+      id: plan.executionChatId,
+      title: `Execute: ${plan?.title || "Plan"}`.slice(0, 80),
+      createdAt: plan?.updatedAt || now,
+      updatedAt: plan?.updatedAt || now,
+      lastModel: null,
+      messages: [{
+        id: `remote-plan-seed-${plan?.id || Date.now()}`,
+        from: peerName || "Collaborator",
+        initials: "CO",
+        text,
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        isMine: false,
+        planId: plan?.id,
+        isExecutionSeed: true,
+        remoteExecution: true,
+      }],
+      planId: plan?.id,
+      remoteExecution: true,
+    };
+  };
+
+  const ensureRemotePlanExecutionSession = (dashboard, plan, peerName) => {
+    if (!plan?.executionChatId) return false;
+    const sessions = Array.isArray(dashboard.soloSessions) ? [...dashboard.soloSessions] : [];
+    if (sessions.some((session) => session?.id === plan.executionChatId)) return false;
+    sessions.unshift(makeRemotePlanExecutionSession(plan, peerName));
+    dashboard.soloSessions = sessions;
+    return true;
+  };
+
+  const mergePlanV2IntoDashboard = (dashboard, incomingPlan, peerName) => {
+    if (!incomingPlan?.id) return false;
+    const plans = Array.isArray(dashboard.plans) ? [...dashboard.plans] : [];
+    const existingIdx = plans.findIndex((plan) => plan && plan.id === incomingPlan.id);
+    const previousPlanJson = existingIdx >= 0 ? JSON.stringify(plans[existingIdx]) : null;
+    let nextPlan = { ...incomingPlan };
+    if (existingIdx >= 0) {
+      const local = plans[existingIdx];
+      if (planV2StatusRank(local?.status) > planV2StatusRank(nextPlan.status)) nextPlan.status = local.status;
+      if (Array.isArray(local?.steps) && Array.isArray(nextPlan.steps)) {
+        const localStepsById = new Map(local.steps.map((step) => [step?.id, step]));
+        nextPlan.steps = nextPlan.steps.map((step) => {
+          const localStep = localStepsById.get(step?.id);
+          if (localStep?.status && planStepStatusRank(localStep.status) > planStepStatusRank(step?.status)) {
+            return { ...step, status: localStep.status };
+          }
+          return step;
+        });
+      }
+      plans[existingIdx] = { ...local, ...nextPlan };
+    } else {
+      plans.push(nextPlan);
+    }
+    dashboard.plans = plans;
+    const sessionChanged = ensureRemotePlanExecutionSession(dashboard, nextPlan, peerName);
+    const planChanged = existingIdx < 0 || previousPlanJson !== JSON.stringify(plans[existingIdx]);
+    return planChanged || sessionChanged;
+  };
+
   // When a P2P peer completes hello handshake, broadcast all local threads so they get full history
   p2pService.onPeerReady(async (projectId, peerId, peerName) => {
     try {
@@ -165,15 +248,23 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
       const localThreads = dashboard?.taskThreads || [];
       const localConversation = dashboard?.conversation || [];
       const localSoloSessions = dashboard?.soloSessions || [];
+      const localPlans = dashboard?.plans || [];
+      const activePlanId = dashboard?.activePlanId || null;
 
-      if (localThreads.length > 0 || localConversation.length > 0 || localSoloSessions.length > 0) {
-        console.log(`[P2P-sync] Peer "${peerName}" connected to project ${projectId.slice(0, 8)} — broadcasting ${localThreads.length} threads, ${localConversation.length} PM messages, ${localSoloSessions.length} freestyle sessions for sync`);
+      if (localThreads.length > 0 || localConversation.length > 0 || localSoloSessions.length > 0 || localPlans.length > 0 || activePlanId) {
+        console.log(`[P2P-sync] Peer "${peerName}" connected to project ${projectId.slice(0, 8)} - broadcasting ${localThreads.length} threads, ${localConversation.length} PM messages, ${localSoloSessions.length} freestyle sessions, ${localPlans.length} plans for sync`);
         p2pService.broadcastStateChange(projectId, "thread-sync", projectId, {
           projectId,
           taskThreads: localThreads,
           conversation: localConversation,
           soloSessions: localSoloSessions,
+          plans: localPlans,
+          activePlanId,
         });
+        for (const plan of localPlans) {
+          if (plan?.id) p2pService.broadcastStateChange(projectId, "plan-v2", plan.id, { projectId, plan });
+        }
+        if (activePlanId) p2pService.broadcastStateChange(projectId, "plan-v2-active", "active", { projectId, activePlanId });
       }
     } catch (err) {
       console.warn("[P2P-sync] Peer-ready thread broadcast error:", err?.message);
@@ -265,30 +356,19 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
     } else if (category === "plan-v2" && data?.plan?.id) {
       // ── Plans v2: upsert into project.dashboard.plans (forward-only on status) ──
       try {
-        const STATUS_ORDER_PLAN_V2 = { draft: 0, active: 1, executing: 2, completed: 3, archived: 4 };
         let didChange = false;
         const result = await settingsService.atomicUpdate((settings) => {
           let projectIndex = settings.projects?.findIndex(p => p.id === projectId);
           if (projectIndex < 0) projectIndex = settings.projects?.findIndex(p => p.id === data.projectId);
           if (projectIndex < 0 || !settings.projects[projectIndex].dashboard) return undefined;
           const dashboard = settings.projects[projectIndex].dashboard;
-          const plans = Array.isArray(dashboard.plans) ? [...dashboard.plans] : [];
-          const existingIdx = plans.findIndex(p => p && p.id === data.plan.id);
-          let nextPlan = { ...data.plan };
-          if (existingIdx >= 0) {
-            const local = plans[existingIdx];
-            const localOrder = STATUS_ORDER_PLAN_V2[local?.status] ?? 0;
-            const incomingOrder = STATUS_ORDER_PLAN_V2[nextPlan.status] ?? 0;
-            if (localOrder > incomingOrder) nextPlan.status = local.status;
-            plans[existingIdx] = nextPlan;
-          } else {
-            plans.push(nextPlan);
-          }
-          dashboard.plans = plans;
-          didChange = true;
+          didChange = mergePlanV2IntoDashboard(dashboard, data.plan, peerName);
           return { ...settings };
         });
-        if (didChange && result) sendEvent("settings:changed", result);
+        if (didChange && result) {
+          console.log(`[P2P-apply] plan-v2 from ${peerName}: ${data.plan.title || data.plan.id} (${data.plan.status || "draft"})`);
+          sendEvent("settings:changed", result);
+        }
       } catch (err) {
         console.warn("[P2P-apply] plan-v2 sync error:", err?.message);
       }
@@ -303,10 +383,18 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
           const plans = Array.isArray(dashboard.plans) ? dashboard.plans.filter(p => p && p.id !== data.planId) : [];
           dashboard.plans = plans;
           if (dashboard.activePlanId === data.planId) dashboard.activePlanId = null;
+          if (Array.isArray(dashboard.soloSessions)) {
+            dashboard.soloSessions = dashboard.soloSessions.map((session) => (
+              session?.planId === data.planId ? { ...session, planId: null } : session
+            ));
+          }
           didChange = true;
           return { ...settings };
         });
-        if (didChange && result) sendEvent("settings:changed", result);
+        if (didChange && result) {
+          console.log(`[P2P-apply] plan-v2 deleted from ${peerName}: ${data.planId}`);
+          sendEvent("settings:changed", result);
+        }
       } catch (err) {
         console.warn("[P2P-apply] plan-v2-deleted sync error:", err?.message);
       }
@@ -322,7 +410,10 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
           didChange = true;
           return { ...settings };
         });
-        if (didChange && result) sendEvent("settings:changed", result);
+        if (didChange && result) {
+          console.log(`[P2P-apply] plan-v2 active from ${peerName}: ${data?.activePlanId || "none"}`);
+          sendEvent("settings:changed", result);
+        }
       } catch (err) {
         console.warn("[P2P-apply] plan-v2-active sync error:", err?.message);
       }
@@ -435,7 +526,7 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
       } catch (err) {
         console.warn("[P2P-apply] Conversation sync error:", err?.message);
       }
-    } else if (category === "thread-sync" && (data?.taskThreads || data?.conversation || data?.soloSessions)) {
+    } else if (category === "thread-sync" && (data?.taskThreads || data?.conversation || data?.soloSessions || data?.plans || Object.prototype.hasOwnProperty.call(data || {}, "activePlanId"))) {
       // ── Full thread sync from a peer that just connected — merge their history into ours ──
       try {
         let didChange = false;
@@ -505,8 +596,19 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
               }
             }
 
+            if (data.plans?.length) {
+              for (const plan of data.plans) {
+                if (mergePlanV2IntoDashboard(dashboard, plan, peerName)) changed = true;
+              }
+            }
+
+            if (Object.prototype.hasOwnProperty.call(data, "activePlanId") && dashboard.activePlanId !== (data.activePlanId || null)) {
+              dashboard.activePlanId = data.activePlanId || null;
+              changed = true;
+            }
+
             if (changed) {
-              console.log(`[P2P-apply] thread-sync from ${peerName}: ${data.taskThreads?.length || 0} threads, ${data.conversation?.length || 0} PM msgs, ${data.soloSessions?.length || 0} solo sessions`);
+              console.log(`[P2P-apply] thread-sync from ${peerName}: ${data.taskThreads?.length || 0} threads, ${data.conversation?.length || 0} PM msgs, ${data.soloSessions?.length || 0} solo sessions, ${data.plans?.length || 0} plans`);
               didChange = true;
               return { ...settings };
             }

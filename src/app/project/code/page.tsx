@@ -281,37 +281,6 @@ function SoloChatPageContent() {
   // Chat mode
   const [chatMode, setChatMode] = useState<ChatMode>("agent");
 
-  // Save-as-plan tracking for AI messages in this solo chat
-  const [savingPlanFor, setSavingPlanFor] = useState<string | null>(null);
-  const [savedPlanForMessage, setSavedPlanForMessage] = useState<Record<string, { planId: string; title: string }>>({});
-
-  const handleSaveAsPlan = useCallback(async (msg: { id: string; text: string }) => {
-    if (!activeProject) return;
-    setSavingPlanFor(msg.id);
-    try {
-      const result = await window.electronAPI?.project?.savePlanFromChatMessage?.({
-        projectId: activeProject.id,
-        markdown: msg.text,
-        source: {
-          kind: "solo-chat",
-          chatId: activeSessionId || `solo-${activeProject.id}`,
-          messageId: msg.id,
-        },
-      });
-      if (result?.id) {
-        setSavedPlanForMessage((prev) => ({
-          ...prev,
-          [msg.id]: { planId: result.id, title: result.title },
-        }));
-        showToast("Saved as plan");
-      }
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Could not save plan");
-    } finally {
-      setSavingPlanFor(null);
-    }
-  }, [activeProject, activeSessionId]);
-
   // Diff view state
   const [diffFile, setDiffFile] = useState<string | null>(null);
 
@@ -589,6 +558,7 @@ function SoloChatPageContent() {
 
   /* --- Reconnect to active solo-chat on mount, or detect other-scope agent --- */
   useEffect(() => {
+    if (!activeProject) return;
     let cancelled = false;
     (async () => {
       try {
@@ -597,10 +567,19 @@ function SoloChatPageContent() {
           setOtherAgentActive(null);
           return;
         }
+        if (req.projectId && req.projectId !== activeProject.id) {
+          setOtherAgentActive(null);
+          return;
+        }
         if (req.scope === "solo-chat") {
+          if (requestedSessionId && req.sessionId && req.sessionId !== requestedSessionId) {
+            setOtherAgentActive({ scope: req.scope, taskName: req.sessionTitle });
+            return;
+          }
           setIsGenerating(true);
           setOtherAgentActive(null);
-          if (req.output) { liveStartStreaming(); liveProcessChunk(req.output); }
+          liveStartStreaming();
+          if (req.output) { liveProcessChunk(req.output); }
         } else {
           // Another agent (task or PM) is running — block freestyle input
           setOtherAgentActive({ scope: req.scope, taskName: req.taskName });
@@ -608,7 +587,7 @@ function SoloChatPageContent() {
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [activeProject?.id, requestedSessionId, liveProcessChunk, liveStartStreaming]);
 
   /* --- Listen for agent completion to clear otherAgentActive blocking --- */
   useEffect(() => {
@@ -621,12 +600,37 @@ function SoloChatPageContent() {
       // agent via setImmediate (no local await), so this listener is the
       // only thing that clears state for that flow.
       if (event?.scope === "solo-chat") {
-        void liveFinalize().then(() => {
-          setTimeout(() => {
-            setIsGenerating(false);
-            liveResetEvents();
-          }, 300);
-        });
+        // Always reset isGenerating + live events, even if liveFinalize throws,
+        // so the saved final message renders without requiring a navigation.
+        const reset = () => {
+          setIsGenerating(false);
+          liveResetEvents();
+        };
+        Promise.resolve(liveFinalize())
+          .catch(() => undefined)
+          .finally(() => {
+            setTimeout(reset, 300);
+          });
+        // Fallback: if the finalize promise stalls, force-reset after 1.5s.
+        setTimeout(() => {
+          setIsGenerating((prev) => (prev ? false : prev));
+        }, 1500);
+        // Defensive: pull the latest settings directly so the saved final
+        // message + plan progress show up even if the settings:changed broadcast
+        // is dropped or coalesced away. Without this the user could end up
+        // having to navigate away and back to see the agent's response.
+        (async () => {
+          try {
+            const fresh = await window.electronAPI?.settings?.get?.();
+            const project = fresh?.projects?.find((p) => p.id === fresh.activeProjectId);
+            const stored = Array.isArray(project?.dashboard?.soloSessions) ? project.dashboard.soloSessions : [];
+            if (stored.length > 0) setSessions(stored as SoloSession[]);
+          } catch { /* ignore */ }
+        })();
+      } else {
+        // Non-solo scopes — just make sure we don't stay in a stuck generating
+        // state if a stray event leaks through.
+        setIsGenerating((prev) => (prev ? false : prev));
       }
     };
     const stopCompleted = window.electronAPI.project.onAgentCompleted?.(handleCompleted);
@@ -1258,7 +1262,7 @@ function SoloChatPageContent() {
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
             {/* Messages */}
             <div ref={conversationRef} className="min-h-0 flex-1 overflow-y-auto custom-scroll px-5 py-6">
-              {!activeSession || activeSession.messages.length === 0 ? (
+              {!activeSession || (activeSession.messages.length === 0 && !activePlan && !isGenerating) ? (
                 <div className="flex h-full flex-col items-center justify-center">
                   <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500/20 to-blue-500/20 ring-1 ring-violet-500/20">
                     <CodeBracketIcon className="h-8 w-8 text-violet-400/80" />
@@ -1372,22 +1376,10 @@ function SoloChatPageContent() {
                               </button>
                             </div>
                             ) : null}
-                            {(msg.planId || savedPlanForMessage[msg.id] || msg.text) ? (
+                            {msg.planId ? (
                               <div className="mt-2 flex flex-wrap items-center gap-2">
-                                {!msg.planId && !savedPlanForMessage[msg.id] && msg.text ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleSaveAsPlan({ id: msg.id, text: msg.text })}
-                                    disabled={savingPlanFor === msg.id}
-                                    className="inline-flex items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 px-2.5 py-1.5 text-[10px] font-semibold text-violet-600 transition hover:bg-violet-500/20 disabled:opacity-50 dark:text-violet-300"
-                                  >
-                                    {savingPlanFor === msg.id ? "Saving…" : "Save as plan"}
-                                  </button>
-                                ) : null}
-                                {(msg.planId || savedPlanForMessage[msg.id]) ? (() => {
-                                  const linked = msg.planId
-                                    ? { planId: msg.planId, title: (msg.planTitle as string) || "Plan" }
-                                    : savedPlanForMessage[msg.id];
+                                {(() => {
+                                  const linked = { planId: msg.planId, title: (msg.planTitle as string) || "Plan" };
                                   if (!linked) return null;
                                   return (
                                     <Link
@@ -1398,7 +1390,7 @@ function SoloChatPageContent() {
                                       <span>→</span>
                                     </Link>
                                   );
-                                })() : null}
+                                })()}
                               </div>
                             ) : null}
                           </div>

@@ -106,10 +106,26 @@ export function useActiveDesktopProject() {
 
     const makeKey = (p: ActiveDesktopProject | null) => {
       if (!p) return "";
-      // Fields the workspace actually depends on. The dashboard.plan is small
-      // (subprojects + tasks — typically <50KB). Everything else in dashboard
-      // is NOT used on the workspace render path, so we deliberately ignore it.
+      // Lightweight signatures for fields the app renders frequently. Avoid
+      // stringifying full chat histories, but include enough message/session
+      // metadata that saved agent responses update chat screens immediately.
       try {
+        const conversationSig = (p.dashboard.conversation ?? []).map((entry) => {
+          const message = entry as { id?: string; time?: string; text?: string } | null;
+          return message ? `${message.id ?? ""}:${message.time ?? ""}:${message.text?.length ?? 0}` : "";
+        }).join(",");
+        const taskThreadsSig = (p.dashboard.taskThreads ?? []).map((entry) => {
+          const thread = entry as { id?: string; updatedAgo?: string; messages?: Array<{ id?: string; time?: string; text?: string }> } | null;
+          const messages = thread?.messages ?? [];
+          const last = messages[messages.length - 1];
+          return thread ? `${thread.id ?? ""}:${thread.updatedAgo ?? ""}:${messages.length}:${last?.id ?? ""}:${last?.time ?? ""}:${last?.text?.length ?? 0}` : "";
+        }).join(",");
+        const soloSessionsSig = (p.dashboard.soloSessions ?? []).map((entry) => {
+          const session = entry as { id?: string; updatedAt?: string; messages?: Array<{ id?: string; time?: string; text?: string }> } | null;
+          const messages = session?.messages ?? [];
+          const last = messages[messages.length - 1];
+          return session ? `${session.id ?? ""}:${session.updatedAt ?? ""}:${messages.length}:${last?.id ?? ""}:${last?.time ?? ""}:${last?.text?.length ?? 0}` : "";
+        }).join(",");
         return [
           p.id,
           p.name,
@@ -121,7 +137,9 @@ export function useActiveDesktopProject() {
           p.githubRepoUrl ?? "",
           p.updatedAt,
           JSON.stringify(p.dashboard.plan ?? null),
-          (p.dashboard.taskThreads?.length ?? 0),
+          conversationSig,
+          taskThreadsSig,
+          soloSessionsSig,
           (p.dashboard.plans?.length ?? 0),
           p.dashboard.activePlanId ?? "",
           // include plan list updatedAt timestamps so renames/status changes invalidate

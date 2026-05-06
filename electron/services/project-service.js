@@ -1266,6 +1266,7 @@ function buildTaskAgentSystemPrompt(taskContext, thread, { mode } = {}) {
     "This section MUST ALWAYS be the very last thing in your response (before the Summary and TASK_STATUS metadata lines), with no other content after it except Summary and TASK_STATUS.",
     "If no user input is required, do not include this section at all.",
     "",
+    mode === "plan" ? PLAN_MODE_INSTRUCTIONS : "",
     mode === "ask" ? ASK_MODE_INSTRUCTIONS : "",
     RESPONSE_SUMMARY_INSTRUCTIONS,
     "",
@@ -3866,6 +3867,12 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       ...planForExecution.steps.map((s, i) => `  ${i + 1}. id=${s.id} status=${s.status} — ${s.text}`),
       "=== END PLAN EXECUTION MODE ===",
     ].join("\n") : null;
+    const planExecutionSeedMessage = planForExecution
+      ? baseMessages.find((msg) => msg?.isExecutionSeed && msg?.planId === planForExecution.id && msg?.text === prompt.trim())
+      : null;
+    const promptHistoryMessages = planExecutionSeedMessage
+      ? baseMessages.filter((msg) => msg !== planExecutionSeedMessage)
+      : baseMessages;
 
     const fullPrompt = [
       "You are a coding assistant working directly with the user in their project.",
@@ -3890,12 +3897,13 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       "## Attention User Input Required",
       "Then list each item, explain what it is, and give clear steps to obtain it.",
       "",
+      mode === "plan" ? PLAN_MODE_INSTRUCTIONS : null,
       mode === "ask" ? ASK_MODE_INSTRUCTIONS : null,
       RESPONSE_SUMMARY_INSTRUCTIONS,
       "",
       `Project: ${project.name}`,
       `Description: ${project.description}`,
-      baseMessages.length > 0 ? `Recent conversation:\n${buildRecentConversationTranscript(baseMessages)}` : null,
+      promptHistoryMessages.length > 0 ? `Recent conversation:\n${buildRecentConversationTranscript(promptHistoryMessages)}` : null,
       nextAttachedFiles.length > 0 ? `Attached files:\n${nextAttachedFiles.map((f) => `- ${f}`).join("\n")}` : null,
       `User message:\n${prompt.trim()}`,
     ].filter(Boolean).join("\n\n");
@@ -3954,12 +3962,30 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       provider,
     };
 
+    let generatedPlan = null;
+    if (mode === "plan" && !planForExecution) {
+      try {
+        generatedPlan = parsePlanMarkdown(visibleResponseText, {
+          projectId,
+          source: { kind: "solo-chat", chatId: `solo-${session.id}`, messageId: aiMessage.id },
+        });
+        if (generatedPlan?.steps?.length === 0) generatedPlan = null;
+      } catch (err) {
+        console.warn(`[solo-chat] plan-parse failed: ${err?.message || err}`);
+        generatedPlan = null;
+      }
+      if (generatedPlan) {
+        aiMessage.planId = generatedPlan.id;
+        aiMessage.planTitle = generatedPlan.title;
+      }
+    }
+
     const updatedSession = {
       ...session,
       title: isNewSession ? (prompt.trim().slice(0, 60) || "New Session") : session.title,
       updatedAt: formatProjectTimestamp(timestamp),
       lastModel: selectedModel || null,
-      messages: [...baseMessages, userMessage, aiMessage],
+      messages: planExecutionSeedMessage ? [...baseMessages, aiMessage] : [...baseMessages, userMessage, aiMessage],
     };
 
     const nextSessions = isNewSession
@@ -3968,7 +3994,8 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
     // If this session is executing a plan, parse step-completion markers from
     // the agent output and update the plan accordingly.
-    let updatedPlans = existingDashboard.plans;
+    const existingPlans = Array.isArray(existingDashboard.plans) ? existingDashboard.plans : [];
+    let updatedPlans = generatedPlan ? [...existingPlans, generatedPlan] : existingPlans;
     let planAfter = null;
     if (planForExecution) {
       const doneIds = new Set();
@@ -3998,7 +4025,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
           status: planComplete || allDone ? "completed" : planForExecution.status,
           updatedAt: new Date().toISOString(),
         };
-        updatedPlans = (existingDashboard.plans ?? []).map((p) => p && p.id === planAfter.id ? planAfter : p);
+        updatedPlans = updatedPlans.map((p) => p && p.id === planAfter.id ? planAfter : p);
       }
     }
 
@@ -4013,6 +4040,15 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     };
 
     const saved = await saveProject(await syncSharedAgentContextFiles(nextProject));
+
+    if (generatedPlan) {
+      try {
+        await sharedStateService.savePlanV2(project.repoPath, generatedPlan);
+        broadcastStateToP2P(projectId, "plan-v2", generatedPlan.id, { plan: generatedPlan, projectId });
+      } catch (err) {
+        console.warn(`[solo-chat] plan persistence failed: ${err?.message || err}`);
+      }
+    }
 
     // Persist plan update to shared state + broadcast to peers
     if (planAfter) {
@@ -4263,6 +4299,24 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       provider,
     };
 
+    let generatedPlan = null;
+    if (mode === "plan") {
+      try {
+        generatedPlan = parsePlanMarkdown(responseText, {
+          projectId,
+          source: { kind: "task-chat", chatId: `task-${latestThread.id}`, messageId: agentMessage.id },
+        });
+        if (generatedPlan?.steps?.length === 0) generatedPlan = null;
+      } catch (err) {
+        console.warn(`[task-agent] plan-parse failed: ${err?.message || err}`);
+        generatedPlan = null;
+      }
+      if (generatedPlan) {
+        agentMessage.planId = generatedPlan.id;
+        agentMessage.planTitle = generatedPlan.title;
+      }
+    }
+
     const statusUpdate = updateTaskStatusInPlan(hydratedProject.dashboard.plan, taskId, taskStatus, timestamp);
 
     // === Targeted merge instead of full project overwrite ===
@@ -4301,6 +4355,10 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
         // 3. Add activity to the FRESH activity array
         const freshActivity = freshDashboard.activity ?? [];
+        const freshPlans = Array.isArray(freshDashboard.plans) ? [...freshDashboard.plans] : [];
+        if (generatedPlan) {
+          freshPlans.push(generatedPlan);
+        }
         const newActivity = [
           ...(freshStatusUpdate.changed ? [{
             id: `activity-task-status-${taskId}-${timestamp}`,
@@ -4331,6 +4389,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
             ...freshDashboard,
             plan: freshStatusUpdate.plan,
             taskThreads: freshThreads,
+            plans: freshPlans,
             activity: [...newActivity, ...freshActivity],
           },
         };
@@ -4358,6 +4417,15 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
       return mergedProject || hydratedProject;
     })();
+
+    if (generatedPlan) {
+      try {
+        await sharedStateService.savePlanV2(hydratedProject.repoPath, generatedPlan);
+        broadcastStateToP2P(projectId, "plan-v2", generatedPlan.id, { plan: generatedPlan, projectId });
+      } catch (err) {
+        console.warn(`[task-agent] plan persistence failed: ${err?.message || err}`);
+      }
+    }
 
     // Broadcast to P2P peers + save to shared state
     const taskConversationId = `task-${latestThread.id}`;
@@ -5354,9 +5422,20 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       "Begin by acknowledging the plan, then execute it step by step.",
     ].filter((line) => line !== null).join("\n");
 
-    // Create an empty session record so the UI can navigate to it. The plan
-    // text is sent as the first user message via sendSoloMessage below, which
-    // also kicks off the agent run.
+    const seededMessage = {
+      id: `solo-seed-${timestamp}`,
+      from: project.creatorName || "You",
+      initials: "YO",
+      text: seedText,
+      time: formatTimeShort(timestamp),
+      isMine: true,
+      modelId: typeof model === "string" ? model : "auto",
+      planId: plan.id,
+      isExecutionSeed: true,
+    };
+
+    // Create a seeded session record so the UI can navigate to it and show the
+    // submitted plan prompt immediately while the fire-and-forget agent starts.
     await settingsService.atomicUpdate((fresh) => {
       const idx = (fresh.projects ?? []).findIndex((p) => p.id === projectId);
       if (idx < 0) return fresh;
@@ -5368,7 +5447,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
         createdAt: formatProjectTimestamp(timestamp),
         updatedAt: formatProjectTimestamp(timestamp),
         lastModel: typeof model === "string" ? model : null,
-        messages: [],
+        messages: [seededMessage],
         planId: plan.id,
       });
       const plans = Array.isArray(dashboard.plans) ? [...dashboard.plans] : [];

@@ -2298,43 +2298,12 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
   };
   const [displayName, setDisplayName] = useState("");
 
-  // Chat mode toggle: PM chat is locked to "plan"; task chats default to "agent" with manual save-as-plan.
+  // Chat mode toggle: PM chat is locked to "plan"; task chats default to "agent".
   const isPMChat = !taskContext;
   const [chatMode, setChatMode] = useState<ChatMode>(isPMChat ? "plan" : "agent");
   useEffect(() => {
     if (isPMChat) setChatMode("plan");
   }, [isPMChat]);
-  const [savingPlanFor, setSavingPlanFor] = useState<string | null>(null);
-  const [savedPlanForMessage, setSavedPlanForMessage] = useState<Record<string, { planId: string; title: string }>>({});
-
-  const handleSaveAsPlan = async (message: { id: string; text: string }) => {
-    if (!message.text || !activeProject) return;
-    setSavingPlanFor(message.id);
-    try {
-      const sourceKind = taskContext ? "task-chat" : "pm-chat";
-      const result = await window.electronAPI?.project?.savePlanFromChatMessage?.({
-        projectId: activeProject.id,
-        markdown: message.text,
-        title: taskContext ? `${taskContext.task.title}` : undefined,
-        source: {
-          kind: sourceKind,
-          chatId: taskContext ? `task-${taskContext.task.id}` : `pm-${activeProject.id}`,
-          messageId: message.id,
-        },
-      });
-      if (result?.id) {
-        setSavedPlanForMessage((prev) => ({
-          ...prev,
-          [message.id]: { planId: result.id, title: result.title },
-        }));
-        showToast("Saved as plan");
-      }
-    } catch (err) {
-      showToast(`Could not save plan: ${(err as Error).message}`);
-    } finally {
-      setSavingPlanFor(null);
-    }
-  };
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags>({});
   const [catalogSources, setCatalogSources] = useState<CatalogSources>({
     copilot: DEFAULT_copilotModels,
@@ -2933,6 +2902,30 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
     })();
     return () => { cancelled = true; };
   }, [activeProject.id, taskContext?.task?.id]);
+
+  // Clear the cross-chat banner when a Freestyle/solo execution finishes.
+  // The main PM listener intentionally ignores solo-chat events, so this
+  // narrow listener prevents stale "Agent running in Freestyle" UI.
+  useEffect(() => {
+    if (!window.electronAPI?.project) return;
+    const clearSoloBanner = (event: { projectId?: string; scope?: string; sessionId?: string }) => {
+      if (event.projectId && event.projectId !== activeProject.id) return;
+      if (event.scope !== "solo-chat") return;
+      setOtherAgentMeta((prev) => {
+        if (!prev || prev.scope !== "solo-chat") return prev;
+        if (event.sessionId && prev.sessionId && event.sessionId !== prev.sessionId) return prev;
+        return null;
+      });
+    };
+    const stopCompleted = window.electronAPI.project.onAgentCompleted?.(clearSoloBanner);
+    const stopError = window.electronAPI.project.onAgentError?.(clearSoloBanner);
+    const stopCancelled = window.electronAPI.project.onAgentCancelled?.(clearSoloBanner);
+    return () => {
+      stopCompleted?.();
+      stopError?.();
+      stopCancelled?.();
+    };
+  }, [activeProject.id]);
 
   // ── Safety watchdog: detect stuck isGenerating state ─────────
   useEffect(() => {
@@ -4300,16 +4293,8 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                 <div className="app-surface relative overflow-hidden rounded-[2.2rem] px-8 py-10 shadow-[0_24px_80px_rgba(20,16,10,0.08)] dark:shadow-[0_28px_88px_rgba(0,0,0,0.3)]">
                   <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-[linear-gradient(90deg,rgba(59,130,246,0.14),rgba(255,255,255,0),rgba(245,158,11,0.12))] dark:bg-[linear-gradient(90deg,rgba(59,130,246,0.18),rgba(255,255,255,0),rgba(251,191,36,0.1))]" />
                   <div className="relative">
-                    <div className="inline-flex items-center gap-2">
-                      <div className="inline-flex rounded-full bg-black/[0.04] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] theme-muted dark:bg-white/[0.06]">
-                        {currentHeaderEyebrow}
-                      </div>
-                      <ChatModeToggle
-                        mode={chatMode}
-                        onChange={setChatMode}
-                        locked={isPMChat}
-                        lockedReason={isPMChat ? "PM chat is plan-only — generates plans you can execute" : undefined}
-                      />
+                    <div className="inline-flex rounded-full bg-black/[0.04] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] theme-muted dark:bg-white/[0.06]">
+                      {currentHeaderEyebrow}
                     </div>
                     <h1 className="display-font mt-5 text-[2.4rem] font-semibold tracking-tight theme-fg sm:text-[2.8rem]">
                       {activeProject.name}
@@ -4331,7 +4316,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                       <p className="mt-3 text-[11px] theme-muted">Analyzes the repo, creates tasks, and sets up the execution plan.</p>
                     </>
                   ) : (
-                    <p className="mx-auto max-w-xl text-[14px] leading-relaxed theme-muted">Start by explaining what you want to build. The PM will shape the plan, then you can move straight into task threads and preview.</p>
+                    <p className="mx-auto max-w-xl text-[14px] leading-relaxed theme-muted">Describe what you want to build and the PM will help shape a plan.</p>
                   )}
                   </div>
                   {(() => {
@@ -4835,16 +4820,6 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                             >
                               Preview
                             </button>
-                            {!message.planId && !savedPlanForMessage[message.id] ? (
-                              <button
-                                type="button"
-                                onClick={() => void handleSaveAsPlan(message)}
-                                disabled={savingPlanFor === message.id}
-                                className="transition hover:theme-fg disabled:opacity-50"
-                              >
-                                {savingPlanFor === message.id ? "Saving…" : "Save as plan"}
-                              </button>
-                            ) : null}
                           </div>
                         ) : message.isAI && !taskContext ? (
                           <div className="mt-1.5 flex items-center gap-3 text-[11px] theme-muted">
@@ -4862,26 +4837,14 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                             >
                               Preview
                             </button>
-                            {!message.planId && !savedPlanForMessage[message.id] ? (
-                              <button
-                                type="button"
-                                onClick={() => void handleSaveAsPlan(message)}
-                                disabled={savingPlanFor === message.id}
-                                className="transition hover:theme-fg disabled:opacity-50"
-                              >
-                                {savingPlanFor === message.id ? "Saving…" : "Save as plan"}
-                              </button>
-                            ) : null}
                           </div>
                         ) : null}
                       />
                     )}
 
-                    {message.isAI && (message.planId || savedPlanForMessage[message.id]) ? (
+                    {message.isAI && message.planId ? (
                       (() => {
-                        const linked = message.planId
-                          ? { planId: message.planId, title: message.planTitle || "Plan" }
-                          : savedPlanForMessage[message.id];
+                        const linked = { planId: message.planId, title: message.planTitle || "Plan" };
                         if (!linked) return null;
                         return (
                           <Link
@@ -5964,7 +5927,14 @@ function RealProjectChatBubble({
           )}
         </div>
         {message.isAI ? (
-          <RunSummaryCard text={message.text} />
+          message.planId ? (
+            <div className="rounded-2xl border border-violet/20 bg-violet/5 px-4 py-3 text-[13px] leading-relaxed theme-fg dark:bg-violet/10">
+              <p className="font-semibold">Plan ready{message.planTitle ? `: ${message.planTitle}` : ""}.</p>
+              <p className="mt-1 text-[12.5px] theme-soft">Open the project plan in the workspace to view the steps and start executing it.</p>
+            </div>
+          ) : (
+            <RunSummaryCard text={message.text} />
+          )
         ) : (
           <PromptCard text={message.text} showEdit={false} />
         )}
