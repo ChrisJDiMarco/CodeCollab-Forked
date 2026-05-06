@@ -411,15 +411,15 @@ export default function PlansClient() {
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-6">
       {/* Header */}
-      <header className="flex flex-col gap-2 border-b border-text-ghost/15 pb-3">
+      <header className="flex flex-col gap-3 border-b border-text-ghost/15 pb-4">
         <Link
           href="/project"
           className="self-start text-[11px] font-semibold uppercase tracking-widest text-text-ghost transition hover:text-violet"
         >
           ← Workspace
         </Link>
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
+        <div className="flex flex-col gap-4">
+          <div className="min-w-0 max-w-3xl">
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="rounded-full bg-violet/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-violet">
                 {STATUS_LABEL[plan.status]}
@@ -433,10 +433,10 @@ export default function PlansClient() {
                 {plan.source?.kind || "manual"}
               </span>
             </div>
-            <h1 className="mt-1 text-2xl font-bold text-text-base">{plan.title}</h1>
-            {plan.tldr && <p className="mt-1 text-[13px] leading-relaxed text-text-soft">{plan.tldr}</p>}
+            <h1 className="mt-2 text-[28px] font-bold leading-[1.05] tracking-normal text-text-base sm:text-[32px]">{plan.title}</h1>
+            {plan.tldr && <p className="mt-2 max-w-2xl text-[13px] leading-relaxed text-text-soft">{plan.tldr}</p>}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-text-ghost/15 bg-canvas/60 px-3 py-2">
             {!agentRunning && !isCompleted && !isArchived && (
               <div className="relative">
                 <button
@@ -444,11 +444,13 @@ export default function PlansClient() {
                   type="button"
                   disabled={busy !== null}
                   onClick={() => { setShowModelMenu((v) => !v); setReasoningView(null); }}
-                  className="flex max-w-[260px] items-center gap-2 rounded-lg border border-text-ghost/25 bg-canvas px-3 py-1.5 text-[12px] font-semibold text-text-soft transition hover:border-violet/40 hover:text-violet disabled:opacity-50"
+                  className="flex min-h-10 w-full min-w-[320px] max-w-[420px] items-center justify-between gap-3 rounded-lg border border-text-ghost/25 bg-canvas px-3 py-2 text-left text-[12px] font-semibold text-text-soft transition hover:border-violet/40 hover:text-violet disabled:opacity-50 sm:w-[380px]"
                   title="Execution model"
                 >
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-text-ghost">Execute with</span>
-                  <span className="min-w-0 truncate text-text-base">{selectedModelMeta?.label ?? selectedExecutionModel}</span>
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="text-[9px] font-bold uppercase tracking-wider text-text-ghost">Execution model</span>
+                    <span className="truncate text-[12px] text-text-base">{selectedModelMeta?.label ?? selectedExecutionModel}</span>
+                  </span>
                   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3 w-3 shrink-0">
                     <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.168l3.71-3.938a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z" clipRule="evenodd" />
                   </svg>
@@ -456,7 +458,7 @@ export default function PlansClient() {
                 {showModelMenu && (
                   <div
                     ref={modelMenuRef}
-                    className="absolute right-0 top-9 z-50 w-[280px] overflow-hidden rounded-[1rem] border border-black/[0.06] bg-[rgba(255,255,255,0.96)] shadow-[0_18px_44px_rgba(0,0,0,0.12)] backdrop-blur-xl dark:border-white/[0.08] dark:bg-[#1a1c20]/95 dark:shadow-[0_18px_44px_rgba(0,0,0,0.34)]"
+                    className="absolute right-0 top-12 z-50 w-[340px] overflow-hidden rounded-[1rem] border border-black/[0.06] bg-[rgba(255,255,255,0.96)] shadow-[0_18px_44px_rgba(0,0,0,0.12)] backdrop-blur-xl dark:border-white/[0.08] dark:bg-[#1a1c20]/95 dark:shadow-[0_18px_44px_rgba(0,0,0,0.34)]"
                   >
                     {hasMultipleProviders && (
                       <div className="flex gap-1 border-b border-black/[0.06] px-2 pb-1.5 pt-2 dark:border-white/[0.08]">
