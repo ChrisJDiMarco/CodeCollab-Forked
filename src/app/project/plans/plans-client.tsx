@@ -661,12 +661,12 @@ export default function PlansClient() {
                   onChange={(e) =>
                     onUpdateStepStatus(step.id, e.target.value as PlanStepV2["status"])
                   }
-                  className="rounded-md border border-text-ghost/20 bg-canvas px-1.5 py-0.5 text-[10px] font-semibold text-text-soft"
+                  className="rounded-md border border-text-ghost/20 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-text-base [color-scheme:light] dark:border-white/20 dark:bg-black dark:text-white dark:[color-scheme:dark]"
                 >
-                  <option value="pending">Pending</option>
-                  <option value="running">Running</option>
-                  <option value="done">Done</option>
-                  <option value="skipped">Skipped</option>
+                  <option className="bg-white text-black dark:bg-black dark:text-white" value="pending">Pending</option>
+                  <option className="bg-white text-black dark:bg-black dark:text-white" value="running">Running</option>
+                  <option className="bg-white text-black dark:bg-black dark:text-white" value="done">Done</option>
+                  <option className="bg-white text-black dark:bg-black dark:text-white" value="skipped">Skipped</option>
                 </select>
               </li>
             ))}

@@ -78,6 +78,22 @@ function TerminalIcon({ className }: { className?: string }) {
   );
 }
 
+function PreviewIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className}>
+      <path d="M10 3.25A8.25 8.25 0 1018.25 11.5 8.25 8.25 0 0010 3.25zm0 1.5c.83 0 1.74 1.23 2.17 3H7.83c.43-1.77 1.34-3 2.17-3zM4.75 11.5c0-.78.17-1.52.47-2.18h2.34A15.78 15.78 0 007.5 11.5c0 .74.05 1.47.16 2.18H5.22a6.7 6.7 0 01-.47-2.18zm1.47 3.68h1.76c.24.77.56 1.44.94 1.96a6.8 6.8 0 01-2.7-1.96zm1.47-3.68c0-.77.06-1.5.17-2.18h4.28c.11.68.17 1.41.17 2.18s-.06 1.5-.17 2.18H7.86a14.2 14.2 0 01-.17-2.18zm2.31 6.75c-.83 0-1.74-1.23-2.17-3h4.34c-.43 1.77-1.34 3-2.17 3zm1.08-1.11c.38-.52.7-1.19.94-1.96h1.76a6.8 6.8 0 01-2.7 1.96zm3.7-3.46h-2.44c.11-.71.16-1.44.16-2.18 0-.74-.05-1.47-.16-2.18h2.44c.3.66.47 1.4.47 2.18s-.17 1.52-.47 2.18zm-.99-5.93h-1.77a8.56 8.56 0 00-.94-1.96 6.8 6.8 0 012.71 1.96z" />
+    </svg>
+  );
+}
+
+function ResetIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className}>
+      <path fillRule="evenodd" d="M4.5 4.75a.75.75 0 01.75.75v1.33A6.5 6.5 0 1110 17a.75.75 0 010-1.5 5 5 0 10-4.12-7.83h1.87a.75.75 0 010 1.5h-3.5a.75.75 0 01-.75-.75V5.5a.75.75 0 01.75-.75z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
@@ -1096,6 +1112,26 @@ function SoloChatPageContent() {
     }
   };
 
+  const handleForceReset = async () => {
+    if (!activeProject?.repoPath) return;
+    try {
+      await window.electronAPI?.project?.forceResetAgent?.({ repoPath: activeProject.repoPath });
+      showToast("Agent force reset");
+    } catch {
+      showToast("Force reset failed");
+    }
+    setIsGenerating(false);
+    setOtherAgentActive(null);
+    setPendingApproval(null);
+    setPendingQuestion(null);
+    setPeerStreams({});
+    liveResetEvents();
+  };
+
+  const handleOpenPreview = () => {
+    router.push("/project/preview");
+  };
+
   const handleOpenInVSCode = async () => {
     if (!activeProject?.repoPath || !window.electronAPI?.process) return;
     try {
@@ -1408,8 +1444,26 @@ function SoloChatPageContent() {
                             <div className="mt-1.5">
                               <RunSummaryCard text={msg.text} />
                             </div>
-                            {msg.checkpointId ? (
                             <div className="mt-2.5 flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={handleOpenPreview}
+                                className="inline-flex items-center gap-1 rounded-lg border border-black/[0.06] bg-black/[0.02] px-2.5 py-1.5 text-[10px] font-semibold theme-muted transition hover:border-cyan-500/30 hover:bg-cyan-500/5 hover:text-cyan-500 dark:border-white/[0.06] dark:bg-white/[0.02] dark:hover:border-cyan-500/30"
+                                title="Open the project preview"
+                              >
+                                <PreviewIcon className="h-3 w-3" />
+                                Preview
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleForceReset()}
+                                className="inline-flex items-center gap-1 rounded-lg border border-amber-500/20 bg-amber-500/8 px-2.5 py-1.5 text-[10px] font-semibold text-amber-600 transition hover:bg-amber-500/15 dark:text-amber-300"
+                                title="Force-kill the stuck agent and clean up"
+                              >
+                                <ResetIcon className="h-3 w-3" />
+                                Force Reset
+                              </button>
+                              {msg.checkpointId ? (
                               <button
                                 type="button"
                                 onClick={async () => {
@@ -1438,8 +1492,8 @@ function SoloChatPageContent() {
                                 </svg>
                                 Restore checkpoint
                               </button>
+                              ) : null}
                             </div>
-                            ) : null}
                             {msg.planId ? (
                               <div className="mt-2 flex flex-wrap items-center gap-2">
                                 {(() => {
@@ -1623,6 +1677,14 @@ function SoloChatPageContent() {
                         <div className="flex items-center gap-2">
                           <span className="text-[12px] font-semibold theme-fg">Coding Agent</span>
                           <span className="animate-pulse text-[10px] text-violet-500">Thinking...</span>
+                          <button
+                            type="button"
+                            onClick={() => void handleForceReset()}
+                            className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[9px] font-semibold text-amber-600 transition hover:bg-amber-500/18 dark:text-amber-300"
+                            title="Force-kill the stuck agent and clean up"
+                          >
+                            Force Reset
+                          </button>
                         </div>
                         {liveEvents.length > 0 ? (
                           <ActivityStream events={liveEvents} rawText={liveGetRawText()} isStreaming={isGenerating} className="max-h-[400px]" showRawOutput />
