@@ -371,7 +371,9 @@ function SoloChatPageContent() {
     const dash = activeProject.dashboard as Record<string, unknown>;
     const stored = Array.isArray(dash?.soloSessions) ? (dash.soloSessions as SoloSession[]) : [];
     setSessions(stored);
-    // If a specific session was requested via ?session=, open it.
+    // If a specific session was requested via ?session=, open it. If the session
+    // hasn't been synced from the peer yet, still set the active id so peer-stream
+    // tokens that target this id render inline (not as a sidebar banner).
     if (requestedSessionId) {
       const requested = stored.find((s) => s.id === requestedSessionId);
       if (requested) {
@@ -379,6 +381,10 @@ function SoloChatPageContent() {
         setActiveSessionId(requested.id);
         return;
       }
+      // No local copy yet — open as a placeholder so peer stream binds to it.
+      setOpenTabIds((prev) => (prev.includes(requestedSessionId) ? prev : [...prev, requestedSessionId]));
+      setActiveSessionId(requestedSessionId);
+      return;
     }
     // If we have stored sessions but no open tabs, open the latest one
     if (stored.length > 0 && openTabIds.length === 0) {
@@ -387,7 +393,7 @@ function SoloChatPageContent() {
       setActiveSessionId(latestId);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProject?.dashboard, isGenerating]);
+  }, [activeProject?.dashboard, isGenerating, requestedSessionId]);
 
   /* --- load featureFlags & model catalogs: settings.get() first (instant), then listStatus in background --- */
   useEffect(() => {
@@ -1262,7 +1268,14 @@ function SoloChatPageContent() {
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
             {/* Messages */}
             <div ref={conversationRef} className="min-h-0 flex-1 overflow-y-auto custom-scroll px-5 py-6">
-              {!activeSession || (activeSession.messages.length === 0 && !activePlan && !isGenerating) ? (
+              {(() => {
+                // If a peer is streaming for the active (or requested) session, treat it as live.
+                const peerStreamForActive = Object.values(peerStreams).find(
+                  (s) => s.scope === "solo-chat" && s.sessionId && (s.sessionId === activeSessionId || s.sessionId === requestedSessionId),
+                );
+                const showEmpty = !peerStreamForActive && (!activeSession || (activeSession.messages.length === 0 && !activePlan && !isGenerating));
+                return showEmpty;
+              })() ? (
                 <div className="flex h-full flex-col items-center justify-center">
                   <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500/20 to-blue-500/20 ring-1 ring-violet-500/20">
                     <CodeBracketIcon className="h-8 w-8 text-violet-400/80" />
@@ -1328,7 +1341,7 @@ function SoloChatPageContent() {
                       </ol>
                     </div>
                   ) : null}
-                  {activeSession.messages.map((msg) => (
+                  {(activeSession?.messages ?? []).map((msg) => (
                     <div key={msg.id}>
                       {msg.isAI ? (
                         <div className="flex gap-3">
@@ -1818,15 +1831,29 @@ function SoloChatPageContent() {
                         </button>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void handleSendMessage()}
-                      disabled={!composerText.trim() || inputBlocked}
-                      className="flex h-7 items-center gap-1.5 rounded-full bg-[#111214] px-3.5 text-[10.5px] font-semibold text-[#f4efe6] transition hover:bg-[#0b1220] disabled:opacity-30 disabled:hover:bg-[#111214] dark:bg-white/90 dark:text-[#111214] dark:hover:bg-white"
-                    >
-                      <SendIcon className="h-3.5 w-3.5" />
-                      Send
-                    </button>
+                    {isGenerating ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void window.electronAPI?.project?.cancelActiveRequest?.();
+                        }}
+                        className="flex h-7 items-center gap-1.5 rounded-full bg-red-500/90 px-3.5 text-[10.5px] font-semibold text-white transition hover:bg-red-500"
+                        title="Stop the running agent"
+                      >
+                        <span className="flex h-2.5 w-2.5 items-center justify-center"><span className="h-2 w-2 rounded-[1px] bg-white" /></span>
+                        Stop
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleSendMessage()}
+                        disabled={!composerText.trim() || inputBlocked}
+                        className="flex h-7 items-center gap-1.5 rounded-full bg-[#111214] px-3.5 text-[10.5px] font-semibold text-[#f4efe6] transition hover:bg-[#0b1220] disabled:opacity-30 disabled:hover:bg-[#111214] dark:bg-white/90 dark:text-[#111214] dark:hover:bg-white"
+                      >
+                        <SendIcon className="h-3.5 w-3.5" />
+                        Send
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

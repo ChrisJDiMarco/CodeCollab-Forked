@@ -134,12 +134,40 @@ export default function PlansClient() {
     const stopCompleted = window.electronAPI?.project?.onAgentCompleted?.(stopDone);
     const stopError = window.electronAPI?.project?.onAgentError?.(stopDone);
     const stopCancelled = window.electronAPI?.project?.onAgentCancelled?.(stopDone);
+
+    // Detect peer agent activity for this plan's execution session: when a
+    // peer is streaming tokens with sessionId === plan.executionChatId, show
+    // the same "Go to live agent" affordance on the invited machine.
+    let peerActivityTimer: ReturnType<typeof setTimeout> | null = null;
+    const stopChatToken = window.electronAPI?.p2p?.onChatToken?.((event: { projectId?: string; scope?: string; sessionId?: string | null }) => {
+      if (!plan.executionChatId) return;
+      if (event.projectId && event.projectId !== activeProject.id) return;
+      if (event.scope !== "solo-chat") return;
+      if (event.sessionId !== plan.executionChatId) return;
+      setAgentRunning(true);
+      if (peerActivityTimer) clearTimeout(peerActivityTimer);
+      peerActivityTimer = setTimeout(() => setAgentRunning(false), 30000);
+    });
+    const stopChatMessage = window.electronAPI?.p2p?.onChatMessage?.((event: { projectId?: string; scope?: string; conversationId?: string; message?: { id?: string } }) => {
+      if (!plan.executionChatId) return;
+      if (event.projectId && event.projectId !== activeProject.id) return;
+      // The peer broadcasts conversationId="solo-{sessionId}" on the final message.
+      if (event.scope !== "solo-chat") return;
+      if (typeof event.conversationId === "string" && event.conversationId === `solo-${plan.executionChatId}`) {
+        if (peerActivityTimer) { clearTimeout(peerActivityTimer); peerActivityTimer = null; }
+        setAgentRunning(false);
+      }
+    });
+
     return () => {
       cancelled = true;
       stopStarted?.();
       stopCompleted?.();
       stopError?.();
       stopCancelled?.();
+      stopChatToken?.();
+      stopChatMessage?.();
+      if (peerActivityTimer) clearTimeout(peerActivityTimer);
     };
   }, [plan?.id, plan?.executionChatId, activeProject?.id]);
 
