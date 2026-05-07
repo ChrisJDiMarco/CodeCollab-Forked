@@ -509,12 +509,17 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
               }
             } else if (msgType === "solo-chat" && data.sessionId) {
               let session = dashboard.soloSessions?.find(s => s.id === data.sessionId);
+              const beforeCount = session?.messages?.length ?? 0;
               if (!session) {
                 session = { id: data.sessionId, title: `Peer session`, messages: [] };
                 if (!dashboard.soloSessions) dashboard.soloSessions = [];
                 dashboard.soloSessions.push(session);
               }
-              session.messages = [...(session.messages || []), ...taggedMessages];
+              const existingSolo = new Set((session.messages || []).map(m => m.id));
+              const dedupedSolo = taggedMessages.filter(m => !existingSolo.has(m.id));
+              session.messages = [...(session.messages || []), ...dedupedSolo];
+              session.updatedAt = new Date().toISOString();
+              try { console.log(`[P2P-apply] solo-chat conversation from ${peerName}: sessionId=${data.sessionId} +${dedupedSolo.length} msg (was ${beforeCount}, now ${session.messages.length})`); } catch {}
             }
 
             console.log(`[P2P-apply] conversation from ${peerName}: +${taggedMessages.length} ${msgType} messages`);

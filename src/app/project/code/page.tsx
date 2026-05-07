@@ -387,6 +387,11 @@ function SoloChatPageContent() {
     if (!activeProject) return;
     const dash = activeProject.dashboard as Record<string, unknown>;
     const stored = Array.isArray(dash?.soloSessions) ? (dash.soloSessions as SoloSession[]) : [];
+    try {
+      const last = stored[stored.length - 1];
+      const lastMsg = last?.messages?.[last.messages.length - 1];
+      console.log(`[freestyle] settings sync soloSessions=${stored.length} lastSession=${last?.id ?? "-"} msgs=${last?.messages?.length ?? 0} lastMsg=${lastMsg?.id ?? "-"}:${lastMsg?.text?.slice(0, 24) ?? ""}`);
+    } catch { /* ignore */ }
     setSessions(stored);
     // If a specific session was requested via ?session=, open it. If the session
     // hasn't been synced from the peer yet, still set the active id so peer-stream
@@ -508,6 +513,8 @@ function SoloChatPageContent() {
   /* --- P2P Peer stream listeners --- */
   const activeProjectIdRef = useRef<string | undefined>(undefined);
   useEffect(() => { activeProjectIdRef.current = activeProject?.id; }, [activeProject?.id]);
+  const peerStreamsRef = useRef(peerStreams);
+  useEffect(() => { peerStreamsRef.current = peerStreams; }, [peerStreams]);
 
   useEffect(() => {
     if (!window.electronAPI?.p2p) return;
@@ -540,10 +547,66 @@ function SoloChatPageContent() {
       }, 30000);
     });
 
-    const stopChatMessage = window.electronAPI.p2p.onChatMessage((event: { projectId?: string; peerId?: string }) => {
+    const stopChatMessage = window.electronAPI.p2p.onChatMessage((event: { projectId?: string; peerId?: string; conversationId?: string; message?: { id?: string; from?: string; text?: string; isAI?: boolean; isMine?: boolean; time?: string }; scope?: string }) => {
       const currentId = activeProjectIdRef.current;
       if (event.projectId && currentId && event.projectId !== currentId) return;
       const peerId = event.peerId || "unknown";
+      // Direct fallback merge: when a peer's solo-chat agent finishes, the
+      // broadcaster sends both a `chat-message` (final AI message) and a
+      // `state-change` for the conversation. The state-change merges into
+      // settings via the main process, but if it's dropped (network coalesce,
+      // stuck reconnect, etc.) the peer would never see the saved message.
+      // Append directly to local sessions so the response renders no matter what.
+      try {
+        const scope = typeof event.scope === "string" ? event.scope : "";
+        const msg = event.message;
+        if (scope === "solo-chat" && msg && typeof msg.text === "string" && msg.text.length > 0) {
+          // Resolve sessionId: prefer the bound peer-stream id, else parse from
+          // conversationId (broadcaster sends `solo-${sessionId}`).
+          const peerSessionId = peerStreamsRef.current[peerId]?.sessionId || null;
+          const conv = typeof event.conversationId === "string" ? event.conversationId : "";
+          const derivedFromConv = conv.startsWith("solo-") ? conv.slice(5) : "";
+          const sessionId = peerSessionId || derivedFromConv;
+          if (sessionId) {
+            const incoming = {
+              id: msg.id || `peer-${Date.now()}`,
+              from: msg.from || "Agent",
+              initials: (msg.from || "AI").slice(0, 2).toUpperCase(),
+              text: msg.text,
+              isAI: msg.isAI ?? true,
+              isMine: msg.isMine ?? false,
+              time: msg.time || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            };
+            setSessions((prev) => {
+              const idx = prev.findIndex((s) => s.id === sessionId);
+              if (idx < 0) {
+                console.log(`[freestyle] chat-message fallback: creating placeholder session ${sessionId}`);
+                return [
+                  ...prev,
+                  {
+                    id: sessionId,
+                    title: peerStreamsRef.current[peerId]?.sessionTitle || "Peer session",
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    lastModel: null,
+                    messages: [incoming],
+                  } as SoloSession,
+                ];
+              }
+              const existing = prev[idx];
+              if (existing.messages.some((m) => m.id === incoming.id)) return prev;
+              const next = [...prev];
+              next[idx] = { ...existing, messages: [...existing.messages, incoming], updatedAt: new Date().toISOString() };
+              console.log(`[freestyle] chat-message fallback: appended msg id=${incoming.id} to session ${sessionId} (now ${next[idx].messages.length})`);
+              return next;
+            });
+          } else {
+            console.log(`[freestyle] chat-message fallback: no sessionId resolvable (peerStream=${peerSessionId}, conv=${conv})`);
+          }
+        }
+      } catch (err) {
+        console.warn("[freestyle] chat-message fallback error:", err);
+      }
       // Keep the timeline visible for a few seconds after the message arrives so
       // users can review what the peer's agent did, especially for fast runs.
       if (peerStreamTimeoutsRef.current[peerId]) clearTimeout(peerStreamTimeoutsRef.current[peerId]);

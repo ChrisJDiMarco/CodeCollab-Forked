@@ -1364,22 +1364,6 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       if (p2pService && typeof p2pService.broadcastChatToken === "function") {
         const projectId = requestMeta?.projectId || "unknown";
         const conversationId = requestMeta?.threadId || requestMeta?.taskId || requestMeta?.scope || "unknown";
-        // Diagnostic: log first non-empty broadcast and a running total so we can
-        // verify how many tokens actually flow per request.
-        if (text) {
-          if (!requestMeta?.__loggedFirstToken) {
-            try { console.log(`[P2P-broadcast] FIRST chat-token scope=${requestMeta?.scope} sessionId=${requestMeta?.sessionId || "-"} bytes=${text.length}`); } catch {}
-            if (requestMeta) requestMeta.__loggedFirstToken = true;
-          }
-          if (requestMeta) {
-            requestMeta.__totalBroadcastBytes = (requestMeta.__totalBroadcastBytes || 0) + text.length;
-            requestMeta.__totalBroadcastCount = (requestMeta.__totalBroadcastCount || 0) + 1;
-            // Periodic totals every 10 broadcasts
-            if (requestMeta.__totalBroadcastCount % 10 === 0) {
-              try { console.log(`[P2P-broadcast] tally scope=${requestMeta?.scope} count=${requestMeta.__totalBroadcastCount} totalBytes=${requestMeta.__totalBroadcastBytes}`); } catch {}
-            }
-          }
-        }
         p2pService.broadcastChatToken(projectId, conversationId, text, requestMeta?.scope || "unknown", {
           taskId: requestMeta?.taskId || null,
           taskName: requestMeta?.taskName || null,
@@ -4092,6 +4076,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     broadcastMessageToP2P(projectId, soloConversationId, aiMessage, "solo-chat");
 
     // Broadcast full conversation update so peer agents share context
+    try { console.log(`[solo-chat] broadcasting conversation state-change sessionId=${updatedSession.id} newMessages=2`); } catch {}
     broadcastStateToP2P(projectId, "conversation", soloConversationId, {
       type: "solo-chat",
       projectId,

@@ -461,10 +461,6 @@ function createP2PService({ sharedStateService, sendEvent: initialSendEvent }) {
         const safeConversationId = sanitizeId(msg.conversationId) || "unknown";
         const safeScope = typeof msg.scope === "string" ? msg.scope.slice(0, 40) : undefined;
         const safeToken = typeof msg.token === "string" ? msg.token.slice(0, 16384) : "";
-        // Light diagnostic on first token of a conversation so logs show the peer is receiving.
-        if (safeToken && !existing.loggedFirst) {
-          try { console.log(`[P2P:${session.projectId.slice(0, 8)}] chat-token recv scope=${safeScope} sessionId=${sanitizeId(msg.sessionId) || "-"} bytes=${safeToken.length}`); } catch {}
-        }
         const accumulated = {
           peerName: peer?.name ?? "Unknown",
           conversationId: safeConversationId,
