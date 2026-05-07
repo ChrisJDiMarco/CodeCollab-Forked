@@ -24,7 +24,6 @@ import { useSearchParams } from "next/navigation";
 import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
 import ActivityStream from "@/components/activity-stream-v2";
 import RunSummaryCard from "@/components/run-summary-card";
-import PromptCard from "@/components/prompt-card";
 import { useStreamEvents } from "@/hooks/use-stream-events";
 import { nowTimestamp } from "@/lib/format-time";
 import { buildPickerRows, effortLabel } from "@/lib/model-picker";
@@ -206,15 +205,6 @@ function IdePageInner() {
     return matchesSearch && catalogSources.copilot.some((m) => m.id === entry.id);
   });
   const selectedModelMeta = modelCatalog.find((e) => e.id === chatModel) ?? modelCatalog[0] ?? { id: "auto", label: "Auto" };
-  const [isDark, setIsDark] = useState(false);
-  useEffect(() => {
-    const check = () => setIsDark(document.documentElement.classList.contains("dark"));
-    check();
-    const obs = new MutationObserver(check);
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
-    return () => obs.disconnect();
-  }, []);
-
   /* -- Copilot chat panel -- */
   const searchParams = useSearchParams();
   const [chatOpen, setChatOpen] = useState(true);
@@ -324,7 +314,10 @@ function IdePageInner() {
   /* -- Session management: share sessions between IDE & freestyle -- */
   type SoloSessionItem = NonNullable<NonNullable<typeof activeProject>["dashboard"]["soloSessions"]>[number];
   const ideSoloSessionId = useRef<string | null>(searchParams.get("sessionId"));
-  const soloSessions: SoloSessionItem[] = activeProject?.dashboard?.soloSessions ?? [];
+  const soloSessions: SoloSessionItem[] = useMemo(
+    () => activeProject?.dashboard?.soloSessions ?? [],
+    [activeProject?.dashboard?.soloSessions],
+  );
 
   // Load session from URL param or when switching sessions
   const loadSession = useCallback((sessionId: string) => {
@@ -372,9 +365,6 @@ function IdePageInner() {
   const [terminalOutput, setTerminalOutput] = useState<string[]>(["$ "]);
   const [terminalInput, setTerminalInput] = useState("");
   const terminalHeight = 200;
-
-  /* -- Search -- */
-  const [searchQuery, setSearchQuery] = useState("");
 
   /* -- Load file tree -- */
   const loadDirectory = useCallback(async (dirPath: string) => {
@@ -492,7 +482,7 @@ function IdePageInner() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [saveFile]);
+  }, [repoPath, saveFile]);
 
   /* -- Drag-to-resize panels -- */
   useEffect(() => {
@@ -681,7 +671,7 @@ function IdePageInner() {
         }
       }, 20);
     }
-  }, [chatInput, ideAttachedFiles, activeTabPath, activeProject, chatModel]);
+  }, [chatInput, ideAttachedFiles, activeTabPath, activeProject, chatModel, liveFinalize, liveGetRawText, liveProcessChunk, liveResetEvents, liveStartStreaming, setChatInput]);
 
   const handleCompactConversation = useCallback(async () => {
     if (!window.electronAPI?.project?.compactConversation || !activeProject || !ideSoloSessionId.current) return;
@@ -1098,7 +1088,7 @@ function IdePageInner() {
                   </div>
                 ) : (
                   /* -- Conversation -- */
-                  chatMessages.map((msg, idx) => (
+                  chatMessages.map((msg) => (
                     <div key={msg.id}>
                       {msg.from === "user" ? (
                         /* User turn */

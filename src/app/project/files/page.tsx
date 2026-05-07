@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
 
@@ -162,6 +162,9 @@ export default function FilesPage() {
   const [isConnectingGithubRepo, setIsConnectingGithubRepo] = useState(false);
   const [canUseDesktopRepo, setCanUseDesktopRepo] = useState(false);
   const [saveStateMessage, setSaveStateMessage] = useState<string | null>(null);
+  const connectedRepoPath = connectedRepo?.repoPath ?? null;
+  const connectedRepoBranch = connectedRepo?.branch ?? null;
+  const hasCodebuddyBuildBranch = connectedRepo?.branches.includes("codebuddy-build") ?? false;
 
   const connectedRepoName = useMemo(() => {
     if (!connectedRepo) {
@@ -196,12 +199,12 @@ export default function FilesPage() {
     [connectedRepo],
   );
 
-  const unstagedFileCount = useMemo(
+  const _unstagedFileCount = useMemo(
     () => connectedRepo?.changedFiles.filter((file) => !isStagedFile(file)).length ?? 0,
     [connectedRepo],
   );
 
-  const liveFileLineCount = useMemo(() => Math.max(1, liveFileDraft.split("\n").length), [liveFileDraft]);
+  const _liveFileLineCount = useMemo(() => Math.max(1, liveFileDraft.split("\n").length), [liveFileDraft]);
 
   const hasUnsavedFileChanges = Boolean(selectedLiveFilePath) && liveFileDraft !== selectedLiveFileContent;
 
@@ -311,16 +314,16 @@ export default function FilesPage() {
   // Auto-switch back to codebuddy-build when leaving the Files tab
   useEffect(() => {
     return () => {
-      if (!connectedRepo || !window.electronAPI?.repo) return;
-      if (connectedRepo.branch !== "codebuddy-build" && connectedRepo.branches.includes("codebuddy-build")) {
+      if (!connectedRepoPath || !window.electronAPI?.repo) return;
+      if (connectedRepoBranch !== "codebuddy-build" && hasCodebuddyBuildBranch) {
         window.electronAPI.repo.checkoutBranch({
-          repoPath: connectedRepo.repoPath,
+          repoPath: connectedRepoPath,
           branchName: "codebuddy-build",
           create: false,
         }).catch(() => { /* best-effort */ });
       }
     };
-  }, [connectedRepo?.repoPath, connectedRepo?.branch]);
+  }, [connectedRepoBranch, connectedRepoPath, hasCodebuddyBuildBranch]);
 
   const handleConnectRepo = async () => {
     if (!window.electronAPI?.system || !window.electronAPI?.repo) {
@@ -354,7 +357,7 @@ export default function FilesPage() {
     }
   };
 
-  const handleReconnectProjectRepo = async () => {
+  const _handleReconnectProjectRepo = async () => {
     if (!activeProject?.repoPath) {
       return;
     }
@@ -480,7 +483,7 @@ export default function FilesPage() {
     }
   };
 
-  const handleStageToggle = async (file: LiveChangedFile) => {
+  const _handleStageToggle = async (file: LiveChangedFile) => {
     if (!window.electronAPI?.repo || !connectedRepo) {
       return;
     }
@@ -504,7 +507,7 @@ export default function FilesPage() {
     }
   };
 
-  const handleStageAll = async (staged: boolean) => {
+  const _handleStageAll = async (staged: boolean) => {
     if (!window.electronAPI?.repo || !connectedRepo) {
       return;
     }
@@ -623,7 +626,7 @@ export default function FilesPage() {
     }
   };
 
-  const handleSaveLiveFile = async () => {
+  const handleSaveLiveFile = useCallback(async () => {
     if (!window.electronAPI?.repo || !connectedRepo || !selectedLiveFilePath || !hasUnsavedFileChanges) {
       return;
     }
@@ -645,7 +648,7 @@ export default function FilesPage() {
     } finally {
       setIsSavingLiveFile(false);
     }
-  };
+  }, [connectedRepo, hasUnsavedFileChanges, liveFileDraft, selectedLiveFilePath]);
 
   useEffect(() => {
     if (!selectedLiveFilePath || selectedDiffPath || selectedCommitDetails) {

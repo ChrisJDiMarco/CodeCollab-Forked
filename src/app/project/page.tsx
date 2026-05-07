@@ -7,6 +7,7 @@ import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
 import ActivityStream from "@/components/activity-stream-v2";
 import { useStreamEvents } from "@/hooks/use-stream-events";
 import { RunInTerminalButton } from "@/components/run-in-terminal-button";
+import type { DesktopActivityEvent } from "@/lib/electron";
 
 type BuildTaskStatus = "planned" | "building" | "review" | "done";
 
@@ -62,6 +63,40 @@ type ProjectPlan = {
   subprojects: ProjectSubproject[];
 };
 
+type PendingApproval = {
+  toolName?: string;
+  summary?: string;
+  requestedAt?: number;
+};
+
+type ActiveRequest = {
+  active?: boolean;
+  projectId?: string;
+  taskId?: string;
+  taskName?: string;
+  threadId?: string;
+  scope?: string;
+  requestId?: string;
+  output?: string;
+  promptText?: string;
+  sessionId?: string;
+  sessionTitle?: string;
+};
+
+type TaskWithSubproject = ProjectTask & {
+  subprojectId: string;
+  subprojectTitle: string;
+};
+
+type NextMove = {
+  kind: "approval" | "agent" | "attention" | "sync" | "remote" | "review" | "continue" | "start" | "empty" | "complete";
+  title: string;
+  detail: string;
+  tone: "violet" | "sun" | "mint" | "coral" | "sky";
+  task?: TaskWithSubproject;
+  meta: string[];
+};
+
 /* ─── visual constants ─── */
 
 const statusColor: Record<BuildTaskStatus, string> = {
@@ -77,14 +112,6 @@ const statusLabel: Record<BuildTaskStatus, string> = {
   review: "Review",
   done: "Done",
 };
-
-const cardAccents = [
-  "from-[#667eea] to-[#764ba2]",
-  "from-[#f093fb] to-[#f5576c]",
-  "from-[#4facfe] to-[#00f2fe]",
-  "from-[#43e97b] to-[#38f9d7]",
-  "from-[#fa709a] to-[#fee140]",
-];
 
 const allStatuses: BuildTaskStatus[] = ["planned", "building", "review", "done"];
 
@@ -114,25 +141,15 @@ function formatDueDate(value: string) {
   }).format(date);
 }
 
-function getDueDateMeta(value: string) {
-  if (!value) {
-    return { label: "No date", tone: "muted" as const };
-  }
+function shortText(value: string, max = 110) {
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max - 1)}…`;
+}
 
-  const dueDate = new Date(`${value}T00:00:00`);
-  const today = new Date();
-  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const diffDays = Math.round((dueDate.getTime() - startOfToday.getTime()) / 86400000);
-
-  if (diffDays < 0) {
-    return { label: `${formatDueDate(value)} · overdue`, tone: "late" as const };
-  }
-
-  if (diffDays <= 2) {
-    return { label: `${formatDueDate(value)} · soon`, tone: "soon" as const };
-  }
-
-  return { label: formatDueDate(value), tone: "muted" as const };
+function isAttentionActivity(event: DesktopActivityEvent) {
+  const haystack = `${event.title} ${event.description}`.toLowerCase();
+  return ["failed", "failure", "error", "blocked", "conflict", "cancelled", "denied", "unavailable"].some((term) => haystack.includes(term));
 }
 
 function moveItem<T>(items: T[], fromIndex: number, toIndex: number) {
@@ -140,45 +157,6 @@ function moveItem<T>(items: T[], fromIndex: number, toIndex: number) {
   const [moved] = next.splice(fromIndex, 1);
   next.splice(toIndex, 0, moved);
   return next;
-}
-
-/* ─── progress ring ─── */
-
-function ProgressRing({ progress, size = 130 }: { progress: number; size?: number }) {
-  const sw = 10;
-  const r = (size - sw) / 2;
-  const c = 2 * Math.PI * r;
-  const offset = c - (progress / 100) * c;
-
-  return (
-    <div className="relative" style={{ width: size, height: size }}>
-      <svg width={size} height={size} className="-rotate-90">
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(140,128,112,0.18)" strokeWidth={sw} />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={r}
-          fill="none"
-          stroke="url(#ring-gradient)"
-          strokeWidth={sw}
-          strokeLinecap="round"
-          strokeDasharray={c}
-          strokeDashoffset={offset}
-          className="transition-all duration-700 ease-out"
-        />
-        <defs>
-          <linearGradient id="ring-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#a78bfa" />
-            <stop offset="100%" stopColor="#34d399" />
-          </linearGradient>
-        </defs>
-      </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center rounded-full bg-[rgba(255,251,244,0.65)] dark:bg-[rgba(15,17,19,0.78)]">
-        <span className="text-[2rem] font-bold tracking-tight theme-fg">{progress}</span>
-        <span className="text-[10px] font-medium uppercase tracking-wider theme-muted">percent</span>
-      </div>
-    </div>
-  );
 }
 
 /* ─── action items ─── */
@@ -938,10 +916,9 @@ export default function ProjectPage() {
   const [dragOverTaskId, setDragOverTaskId] = useState<string | null>(null);
   const [draggedSpId, setDraggedSpId] = useState<string | null>(null);
   const [dragOverSpId, setDragOverSpId] = useState<string | null>(null);
-  const [currentVersion, setCurrentVersion] = useState(1);
-  const [showVersionConfirm, setShowVersionConfirm] = useState(false);
-  const [pushingToGithub, setPushingToGithub] = useState(false);
-  const [pushResult, setPushResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [currentVersion] = useState(1);
+  const [_pushingToGithub, setPushingToGithub] = useState(false);
+  const [_pushResult, setPushResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   /* File watcher / auto-sync state */
   const [fileWatcherActive, setFileWatcherActive] = useState(false);
@@ -949,6 +926,7 @@ export default function ProjectPage() {
   const [lastAutoSync, setLastAutoSync] = useState<string | null>(null);
   const [pushingToMain, setPushingToMain] = useState(false);
   const [pushToMainResult, setPushToMainResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [recentChangedFiles, setRecentChangedFiles] = useState<string[]>([]);
 
   /* P2P collaboration state */
   const [p2pJoined, setP2pJoined] = useState(false);
@@ -958,9 +936,16 @@ export default function ProjectPage() {
   const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
   const [inviteRemoteUrl, setInviteRemoteUrl] = useState<string | null>(null);
-  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
+  const [, setLastSyncTime] = useState<Date | null>(null);
   const [hasRemote, setHasRemote] = useState(false);
   const syncInFlightRef = useRef(false);
+
+  /* Workspace guidance state */
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [activeRequest, setActiveRequest] = useState<ActiveRequest | null>(null);
+  const [recentActivity, setRecentActivity] = useState<DesktopActivityEvent[]>([]);
+  const [nextMoveMessage, setNextMoveMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [approvalBusy, setApprovalBusy] = useState<"approve" | "deny" | null>(null);
 
   // People you can assign a task to: yourself + the AI + anyone currently
   // connected as a P2P peer on this project + any historical assignee stored
@@ -1048,7 +1033,7 @@ export default function ProjectPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject?.id, hasRemote]);
 
-  const handlePushToGithub = async () => {
+  const _handlePushToGithub = async () => {
     if (!activeProject?.repoPath) return;
     setPushingToGithub(true);
     setPushResult(null);
@@ -1086,7 +1071,7 @@ export default function ProjectPage() {
     setPushingToMain(true);
     setPushToMainResult(null);
     try {
-      const result = await window.electronAPI?.fileWatcher?.pushToMain({ repoPath: activeProject.repoPath });
+      const result = await window.electronAPI?.fileWatcher?.pushToMain({ repoPath: activeProject.repoPath, projectId: activeProject.id });
       if (result?.success) {
         setPushToMainResult({ ok: true, message: result.message });
       } else {
@@ -1137,7 +1122,7 @@ export default function ProjectPage() {
     if (!api) return;
 
     // Start file watcher on project load
-    api.start({ repoPath: activeProject.repoPath }).then((status) => {
+    api.start({ repoPath: activeProject.repoPath, projectId: activeProject.id }).then((status) => {
       setFileWatcherActive(status?.watching ?? false);
     }).catch(() => {});
 
@@ -1159,12 +1144,78 @@ export default function ProjectPage() {
     unsubs.push(api.onStatus?.((data) => {
       setFileWatcherActive(data.watching);
     }));
+    unsubs.push(api.onChanged?.((data) => {
+      if (!data?.filePath) return;
+      setRecentChangedFiles((current) => {
+        const next = [data.filePath, ...current.filter((filePath) => filePath !== data.filePath)];
+        return next.slice(0, 6);
+      });
+    }));
 
     return () => {
       unsubs.forEach(u => u?.());
       // Don't stop watcher on unmount — it should keep running while the project is open
     };
-  }, [activeProject?.repoPath]);
+  }, [activeProject?.id, activeProject?.repoPath]);
+
+  useEffect(() => {
+    if (!window.electronAPI?.activity) return;
+
+    let cancelled = false;
+    const hydrate = async () => {
+      try {
+        const events = await window.electronAPI!.activity.list();
+        if (!cancelled) setRecentActivity(events.slice(0, 12));
+      } catch { /* ignore */ }
+    };
+
+    void hydrate();
+    const stop = window.electronAPI.activity.onCreated((event) => {
+      setRecentActivity((current) => [event, ...current].slice(0, 12));
+    });
+
+    return () => {
+      cancelled = true;
+      stop();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!window.electronAPI?.project) return;
+
+    let cancelled = false;
+    const refresh = async () => {
+      let nextApproval: PendingApproval | null = null;
+      let nextRequest: ActiveRequest | null = null;
+
+      try {
+        const pending = await window.electronAPI!.project.getPendingApproval?.();
+        if (pending && typeof pending === "object") {
+          nextApproval = pending as PendingApproval;
+        }
+      } catch { /* ignore */ }
+
+      try {
+        const active = await window.electronAPI!.project.getActiveRequest?.();
+        if (active && typeof active === "object") {
+          const request = active as ActiveRequest;
+          if (request.active !== false) nextRequest = request;
+        }
+      } catch { /* ignore */ }
+
+      if (!cancelled) {
+        setPendingApproval(nextApproval);
+        setActiveRequest(nextRequest);
+      }
+    };
+
+    void refresh();
+    const interval = setInterval(() => { void refresh(); }, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   /* P2P event listeners — filter events by current project */
   useEffect(() => {
@@ -1259,7 +1310,7 @@ export default function ProjectPage() {
       planLoadedRef.current = true;
       console.log("[planLoaded] Set to true after rAF. Subprojects:", plan?.subprojects?.length || 0);
     });
-  }, [plan, activeProject?.id]);
+  }, [plan, activeProject?.id, initialSubprojectOrder, initialTaskOrder]);
 
   // Debounced auto-save: persist plan changes to settings + .codebuddy/plan.json + git push
   // Also broadcast instantly via P2P when live-connected
@@ -1359,7 +1410,7 @@ export default function ProjectPage() {
   }, [activeProject?.id, plan]);
 
   const workspaceTitle = activeProject?.name ?? "Project workspace";
-  const workspaceSubtitle = activeProject?.description ?? "Open a real project to see its dashboard.";
+  const _workspaceSubtitle = activeProject?.description ?? "Open a real project to see its dashboard.";
   const hasRealProjectWithoutPlan = Boolean(activeProject && !plan);
   const hasNoActiveDesktopProject = Boolean(canUseDesktopProject && !activeProject);
 
@@ -1401,6 +1452,19 @@ export default function ProjectPage() {
     return out;
   }, [orderedSubprojects, taskIndex]);
 
+  const allTaskCards = useMemo(() => {
+    const out: TaskWithSubproject[] = [];
+    for (const sp of orderedSubprojects) {
+      const sorted = [...sp.tasks].sort(
+        (a, b) => (taskIndex.get(a.id) ?? 0) - (taskIndex.get(b.id) ?? 0),
+      );
+      for (const task of sorted) {
+        out.push({ ...task, subprojectId: sp.id, subprojectTitle: sp.title });
+      }
+    }
+    return out;
+  }, [orderedSubprojects, taskIndex]);
+
   const overallProgress = useMemo(() => {
     if (allTasks.length === 0) return 0;
     let done = 0;
@@ -1413,7 +1477,131 @@ export default function ProjectPage() {
   const selectedTaskConversations = selectedTask
     ? taskConversationThreads.filter((thread) => thread.taskId === selectedTask.id)
     : [];
-  const personalTasks = useMemo(() => {
+  const activitySource = recentActivity.length > 0
+    ? recentActivity
+    : ((activeProject?.dashboard.activity ?? []) as DesktopActivityEvent[]);
+  const recentAttention = activitySource.find(isAttentionActivity);
+  const nextMove = useMemo<NextMove>(() => {
+    const reviewTask = allTaskCards.find((task) => task.status === "review");
+    const buildingTask = allTaskCards.find((task) => task.status === "building");
+    const plannedTask = allTaskCards.find((task) => task.status === "planned");
+    const doneCount = allTaskCards.filter((task) => task.status === "done").length;
+    const changedSummary = recentChangedFiles.length > 0 ? `${recentChangedFiles.length} recent file change${recentChangedFiles.length === 1 ? "" : "s"}` : null;
+
+    if (pendingApproval) {
+      return {
+        kind: "approval",
+        title: "Approve the waiting tool call",
+        detail: pendingApproval.summary ?? pendingApproval.toolName ?? "An agent is paused until you approve or deny its tool request.",
+        tone: "sun",
+        meta: ["Human gate", pendingApproval.toolName ?? "Tool approval"],
+      };
+    }
+
+    if (activeRequest) {
+      const label = activeRequest.taskName ?? activeRequest.sessionTitle ?? (activeRequest.scope === "pm-chat" ? "Planner" : "Agent");
+      return {
+        kind: "agent",
+        title: `${label} is running`,
+        detail: shortText(activeRequest.promptText ?? activeRequest.output ?? "Let the active run finish or open chat to inspect the latest output.", 130),
+        tone: "violet",
+        meta: ["Agent active", changedSummary ?? "Workspace reserved"],
+      };
+    }
+
+    if (recentAttention) {
+      return {
+        kind: "attention",
+        title: recentAttention.title,
+        detail: recentAttention.description,
+        tone: "coral",
+        meta: ["Needs attention", recentAttention.time],
+      };
+    }
+
+    if (autoSyncing) {
+      return {
+        kind: "sync",
+        title: "Workspace sync is in flight",
+        detail: "CodeCollab is publishing local changes. Let the sync finish before starting another agent run.",
+        tone: "sky",
+        meta: ["Syncing", changedSummary ?? "Watching files"],
+      };
+    }
+
+    if (activeProject && !hasRemote) {
+      return {
+        kind: "remote",
+        title: "Connect this project to GitHub",
+        detail: "A remote unlocks invite codes, auto-sync, and safer collaboration across machines.",
+        tone: "sun",
+        meta: ["No remote", "Collaboration blocked"],
+      };
+    }
+
+    if (p2pError) {
+      return {
+        kind: "remote",
+        title: "Fix collaboration connection",
+        detail: p2pError,
+        tone: "coral",
+        meta: ["P2P", "Connection issue"],
+      };
+    }
+
+    if (reviewTask) {
+      return {
+        kind: "review",
+        title: `Review ${reviewTask.title}`,
+        detail: `${reviewTask.subprojectTitle} has work ready for review. Confirm it, ask for fixes, or mark it done.`,
+        tone: "sun",
+        task: reviewTask,
+        meta: ["Review", reviewTask.owner],
+      };
+    }
+
+    if (buildingTask) {
+      return {
+        kind: "continue",
+        title: `Continue ${buildingTask.title}`,
+        detail: `${buildingTask.subprojectTitle} is already in motion. Keep the thread moving before starting fresh work.`,
+        tone: "violet",
+        task: buildingTask,
+        meta: ["Building", changedSummary ?? buildingTask.owner],
+      };
+    }
+
+    if (plannedTask) {
+      return {
+        kind: "start",
+        title: `Start ${plannedTask.title}`,
+        detail: `${plannedTask.subprojectTitle} is the next planned task in the build order.`,
+        tone: "mint",
+        task: plannedTask,
+        meta: ["Next planned", plannedTask.owner],
+      };
+    }
+
+    if (allTaskCards.length === 0) {
+      return {
+        kind: "empty",
+        title: "Shape the first build slice",
+        detail: activeProject ? "Create the first subproject/task or ask PM Chat to break the project into buildable pieces." : "Open or create a real project before planning work.",
+        tone: "sky",
+        meta: ["No tasks yet", activeProject ? "Ready to plan" : "No project"],
+      };
+    }
+
+    return {
+      kind: "complete",
+      title: "Everything in the plan is done",
+      detail: `${doneCount} tasks are complete. Merge to main when you are comfortable with the final state.`,
+      tone: "mint",
+      meta: ["Plan complete", `${overallProgress}%`],
+    };
+  }, [activeProject, activeRequest, allTaskCards, autoSyncing, hasRemote, overallProgress, p2pError, pendingApproval, recentAttention, recentChangedFiles]);
+
+  const _personalTasks = useMemo(() => {
     const out: Array<ProjectTask & { subprojectTitle: string }> = [];
     for (const sp of orderedSubprojects) {
       for (const task of sp.tasks) {
@@ -1426,16 +1614,41 @@ export default function ProjectPage() {
 
   const getAssigneeMeta = (name: string) =>
     assignablePeople.find((person) => person.name === name) ?? { name, initials: name.slice(0, 2).toUpperCase() };
-  const getSubprojectOrderNumber = (subprojectId: string) => {
+  const _getSubprojectOrderNumber = (subprojectId: string) => {
     const idx = subprojectIndex.get(subprojectId);
     return idx === undefined ? null : idx + 1;
   };
-  const getTaskOrderNumber = (taskId: string) => {
+  const _getTaskOrderNumber = (taskId: string) => {
     const idx = taskIndex.get(taskId);
     return idx === undefined ? null : idx + 1;
   };
 
   /* handlers */
+
+  const focusNextMoveTask = () => {
+    if (!nextMove.task) return;
+    setSelectedSubprojectId(nextMove.task.subprojectId);
+    setSelectedTaskId(nextMove.task.id);
+    setShowTaskDetails(true);
+    setShowAssigneePicker(false);
+    setShowDueDatePicker(false);
+  };
+
+  const handleNextMoveApproval = async (approved: boolean) => {
+    if (!window.electronAPI?.project?.approveToolCall) return;
+    setApprovalBusy(approved ? "approve" : "deny");
+    setNextMoveMessage(null);
+    try {
+      const result = await window.electronAPI.project.approveToolCall({ approved });
+      if (!result?.success) throw new Error(result?.error ?? "Approval response failed.");
+      setPendingApproval(null);
+      setNextMoveMessage({ ok: true, text: approved ? "Tool call approved." : "Tool call denied." });
+    } catch (err) {
+      setNextMoveMessage({ ok: false, text: err instanceof Error ? err.message : "Could not send approval response." });
+    } finally {
+      setApprovalBusy(null);
+    }
+  };
 
   const handleAddSubproject = () => {
     if (!newSubprojectTitle.trim()) return;
@@ -1576,7 +1789,7 @@ export default function ProjectPage() {
     );
   };
 
-  const handleOpenTaskDetails = (spId: string, taskId: string) => {
+  const _handleOpenTaskDetails = (spId: string, taskId: string) => {
     // Open inline drawer without navigating away from the workspace page
     setSelectedSubprojectId(spId);
     setSelectedTaskId(taskId);
@@ -1709,7 +1922,7 @@ export default function ProjectPage() {
     setShowDueDatePicker(false);
   };
 
-  const handleMoveSubproject = (subprojectId: string, direction: "earlier" | "later") => {
+  const _handleMoveSubproject = (subprojectId: string, direction: "earlier" | "later") => {
     setSubprojectOrder((current) => {
       const index = current.indexOf(subprojectId);
       if (index === -1) return current;
@@ -1719,7 +1932,7 @@ export default function ProjectPage() {
     });
   };
 
-  const handleMoveTask = (taskId: string, direction: "earlier" | "later") => {
+  const _handleMoveTask = (taskId: string, direction: "earlier" | "later") => {
     setTaskOrder((current) => {
       const index = current.indexOf(taskId);
       if (index === -1) return current;
@@ -1739,6 +1952,14 @@ export default function ProjectPage() {
       return next;
     });
   };
+
+  const nextMoveToneClass = {
+    violet: "border-violet/20 bg-violet/5 text-violet",
+    sun: "border-sun/24 bg-sun/5 text-sun",
+    mint: "border-mint/20 bg-mint/5 text-mint",
+    coral: "border-coral/24 bg-coral/5 text-coral",
+    sky: "border-sky/20 bg-sky/5 text-sky",
+  }[nextMove.tone];
 
   return (
     <div className="min-h-full text-text">
@@ -1905,6 +2126,112 @@ export default function ProjectPage() {
           {subprojects.length} subprojects · {allTasks.filter((t) => t.status === "done").length} done · {allTasks.filter((t) => t.status === "building").length} building · {allTasks.length} total tasks
         </div>
 
+        {/* ═══════════════════ NEXT MOVE ═══════════════════ */}
+        <section className={`mb-4 overflow-hidden rounded-xl border px-4 py-3 ${nextMoveToneClass}`}>
+          <div className="grid gap-4 lg:grid-cols-[1.4fr_0.9fr] lg:items-center">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-current/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.12em]">
+                  Next move
+                </span>
+                {nextMove.meta.map((item) => (
+                  <span key={item} className="rounded-full bg-stage/70 px-2 py-0.5 text-[10px] font-semibold text-text-dim ring-1 ring-edge/50">
+                    {item}
+                  </span>
+                ))}
+              </div>
+              <h2 className="mt-2 truncate font-display text-[18px] font-semibold text-text">{nextMove.title}</h2>
+              <p className="mt-1 max-w-3xl text-[12.5px] leading-relaxed text-text-soft">{nextMove.detail}</p>
+              {nextMoveMessage && (
+                <p className={`mt-2 text-[11px] font-medium ${nextMoveMessage.ok ? "text-mint" : "text-coral"}`}>
+                  {nextMoveMessage.text}
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2 lg:items-end">
+              <div className="flex flex-wrap gap-2 lg:justify-end">
+                {nextMove.kind === "approval" && (
+                  <>
+                    <button type="button" onClick={() => { void handleNextMoveApproval(true); }} disabled={approvalBusy !== null} className="rounded-lg bg-mint/15 px-3 py-2 text-[11px] font-semibold text-mint transition hover:bg-mint/25 disabled:opacity-50">
+                      {approvalBusy === "approve" ? "Approving..." : "Approve"}
+                    </button>
+                    <button type="button" onClick={() => { void handleNextMoveApproval(false); }} disabled={approvalBusy !== null} className="rounded-lg bg-coral/12 px-3 py-2 text-[11px] font-semibold text-coral transition hover:bg-coral/20 disabled:opacity-50">
+                      {approvalBusy === "deny" ? "Denying..." : "Deny"}
+                    </button>
+                  </>
+                )}
+
+                {nextMove.kind === "agent" && (
+                  <>
+                    <Link href={activeRequest?.taskId ? `/project/chat?task=${encodeURIComponent(activeRequest.taskId)}` : "/project/chat"} className="rounded-lg bg-violet/15 px-3 py-2 text-[11px] font-semibold text-violet transition hover:bg-violet/25">
+                      Open chat
+                    </Link>
+                    <Link href="/project/activity" className="rounded-lg bg-stage-up px-3 py-2 text-[11px] font-semibold text-text-dim ring-1 ring-edge transition hover:bg-stage-up2 hover:text-text">
+                      Activity
+                    </Link>
+                  </>
+                )}
+
+                {(nextMove.kind === "attention" || nextMove.kind === "sync") && (
+                  <Link href="/project/activity" className="rounded-lg bg-stage-up px-3 py-2 text-[11px] font-semibold text-text-dim ring-1 ring-edge transition hover:bg-stage-up2 hover:text-text">
+                    Open Activity
+                  </Link>
+                )}
+
+                {nextMove.kind === "remote" && (
+                  <Link href="/project/settings" className="rounded-lg bg-sun/15 px-3 py-2 text-[11px] font-semibold text-sun transition hover:bg-sun/25">
+                    Open settings
+                  </Link>
+                )}
+
+                {(nextMove.kind === "review" || nextMove.kind === "continue" || nextMove.kind === "start") && nextMove.task && (
+                  <>
+                    <Link href={`/project/chat?task=${encodeURIComponent(nextMove.task.id)}`} className="rounded-lg bg-violet/15 px-3 py-2 text-[11px] font-semibold text-violet transition hover:bg-violet/25">
+                      {nextMove.kind === "start" ? "Start task" : "Open thread"}
+                    </Link>
+                    <button type="button" onClick={focusNextMoveTask} className="rounded-lg bg-stage-up px-3 py-2 text-[11px] font-semibold text-text-dim ring-1 ring-edge transition hover:bg-stage-up2 hover:text-text">
+                      Details
+                    </button>
+                    {nextMove.kind === "review" && (
+                      <button type="button" onClick={() => handleChangeTaskStatus(nextMove.task!.id, "done")} className="rounded-lg bg-mint/15 px-3 py-2 text-[11px] font-semibold text-mint transition hover:bg-mint/25">
+                        Mark done
+                      </button>
+                    )}
+                  </>
+                )}
+
+                {nextMove.kind === "empty" && (
+                  <>
+                    <Link href="/project/chat" className="rounded-lg bg-violet/15 px-3 py-2 text-[11px] font-semibold text-violet transition hover:bg-violet/25">
+                      Ask PM Chat
+                    </Link>
+                    <button type="button" onClick={() => setShowSubprojectCreator(true)} disabled={hasNoActiveDesktopProject} className="rounded-lg bg-stage-up px-3 py-2 text-[11px] font-semibold text-text-dim ring-1 ring-edge transition hover:bg-stage-up2 hover:text-text disabled:opacity-50">
+                      Add subproject
+                    </button>
+                  </>
+                )}
+
+                {nextMove.kind === "complete" && (
+                  <button type="button" onClick={() => void handlePushToMain()} disabled={pushingToMain || !activeProject?.repoPath} className="rounded-lg bg-mint/15 px-3 py-2 text-[11px] font-semibold text-mint transition hover:bg-mint/25 disabled:opacity-50">
+                    {pushingToMain ? "Merging..." : "Merge to main"}
+                  </button>
+                )}
+              </div>
+
+              {recentChangedFiles.length > 0 && (
+                <div className="flex max-w-full flex-wrap justify-start gap-1.5 lg:justify-end">
+                  {recentChangedFiles.slice(0, 3).map((filePath) => (
+                    <span key={filePath} className="max-w-[180px] truncate rounded-full bg-stage/70 px-2 py-0.5 text-[10px] font-medium text-text-ghost ring-1 ring-edge/50" title={filePath}>
+                      {filePath}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+
         {/* ═══════════════════ EMPTY STATES ═══════════════════ */}
         {hasNoActiveDesktopProject && (
           <div className="mb-4 rounded-xl border border-dashed border-edge bg-stage-up/30 px-4 py-4">
@@ -1928,7 +2255,6 @@ export default function ProjectPage() {
         <div className="flex flex-col gap-0">
           {orderedSubprojects.map((sp, spIndex) => {
             const spCounts = getPlanCounts(sp.tasks);
-            const spPct = spCounts.total > 0 ? Math.round((spCounts.done / spCounts.total) * 100) : 0;
             const isCollapsed = collapsedSections.has(sp.id);
             const hasBuildingTasks = sp.tasks.some((t) => t.status === "building");
             const orderedTasks = [...sp.tasks].sort((a, b) => taskOrder.indexOf(a.id) - taskOrder.indexOf(b.id));
@@ -2093,8 +2419,6 @@ export default function ProjectPage() {
                       const isDone = task.status === "done";
                       const isBuilding = task.status === "building";
                       const isReview = task.status === "review";
-                      const isPlanned = task.status === "planned";
-
                       return (
                         <div
                           key={task.id}
@@ -2528,4 +2852,3 @@ export default function ProjectPage() {
     </div>
   );
 }
-

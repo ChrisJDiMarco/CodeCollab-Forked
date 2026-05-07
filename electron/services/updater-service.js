@@ -18,6 +18,13 @@ const { app, ipcMain } = require("electron");
 let initialised = false;
 let lastStatus = { state: "idle", info: null };
 
+function registerUnsupportedUpdaterHandlers(reason) {
+  lastStatus = { state: "unsupported", info: null };
+  ipcMain.handle("updater:check", () => ({ ok: false, reason }));
+  ipcMain.handle("updater:installNow", () => ({ ok: false, reason }));
+  ipcMain.handle("updater:getStatus", () => lastStatus);
+}
+
 function broadcast(getMainWindow, channel, payload) {
   try {
     const win = typeof getMainWindow === "function" ? getMainWindow() : null;
@@ -39,15 +46,14 @@ function initAutoUpdater({ getMainWindow }) {
   // Skip auto-updates in dev (the updater throws if it can't find a packaged app)
   if (!app.isPackaged) {
     console.log("[updater] Skipping in dev mode");
+    registerUnsupportedUpdaterHandlers("dev-mode");
     return;
   }
 
   // macOS auto-update requires codesigning. We're unsigned, so disable it on Mac.
   if (process.platform === "darwin") {
     console.log("[updater] Skipping on macOS (unsigned build — manual updates only)");
-    ipcMain.handle("updater:check", () => ({ ok: false, reason: "unsupported-platform" }));
-    ipcMain.handle("updater:installNow", () => ({ ok: false, reason: "unsupported-platform" }));
-    ipcMain.handle("updater:getStatus", () => ({ state: "unsupported", info: null }));
+    registerUnsupportedUpdaterHandlers("unsupported-platform");
     return;
   }
 
@@ -56,6 +62,7 @@ function initAutoUpdater({ getMainWindow }) {
     ({ autoUpdater } = require("electron-updater"));
   } catch (err) {
     console.error("[updater] Failed to load electron-updater:", err?.message ?? err);
+    registerUnsupportedUpdaterHandlers("updater-unavailable");
     return;
   }
 

@@ -10,13 +10,16 @@
 const fs = require("fs");
 const path = require("path");
 
-function createFileWatcherService({ repoService, processService, p2pService, gitQueueService, sendEvent }) {
+function createFileWatcherService({ p2pService, gitQueueService, sendEvent, activityService }) {
   let watcher = null;
   let watchedRepoPath = null;
+  let watchedProjectId = null;
   let debounceTimer = null;
   let paused = false;
   let syncing = false;
   let agentActive = false;  // True while a task/PM/solo agent process is running
+  let emit = typeof sendEvent === "function" ? sendEvent : () => undefined;
+  let activity = activityService || null;
 
   // Fallback no-op queue if one wasn't passed in (keeps service usable in tests)
   const queue = gitQueueService || {
@@ -37,6 +40,46 @@ function createFileWatcherService({ repoService, processService, p2pService, git
     console.log("[file-watcher]", ...args);
   }
 
+  function emitEvent(channel, payload = {}) {
+    emit(channel, {
+      projectId: watchedProjectId,
+      ...payload,
+    });
+  }
+
+  function shortError(message) {
+    if (!message) return "Unknown error.";
+    const firstLine = String(message).split("\n")[0].trim();
+    return firstLine.length > 180 ? `${firstLine.slice(0, 177)}...` : firstLine;
+  }
+
+  function recordActivity(event) {
+    if (!activity || typeof activity.addEvent !== "function") return;
+    activity.addEvent({
+      type: "sync",
+      actor: "CodeCollab",
+      actorInitials: "CB",
+      ...event,
+    });
+  }
+
+  function normalizeProjectId(projectId) {
+    return typeof projectId === "string" && projectId.trim() ? projectId.trim() : null;
+  }
+
+  function broadcastProjectStateChange(category, id, data, projectIdOverride) {
+    if (!p2pService || typeof p2pService.broadcastStateChange !== "function") return false;
+
+    const projectId = normalizeProjectId(projectIdOverride) || watchedProjectId;
+    if (!projectId) {
+      log(`Skipping ${category} P2P broadcast — no active project id.`);
+      return false;
+    }
+
+    p2pService.broadcastStateChange(projectId, category, id, data);
+    return true;
+  }
+
   function shouldIgnore(relativePath) {
     if (!relativePath) return true;
     const parts = relativePath.split(path.sep);
@@ -50,13 +93,15 @@ function createFileWatcherService({ repoService, processService, p2pService, git
     return false;
   }
 
-  async function startWatching(repoPath) {
+  async function startWatching(repoPath, projectId = null) {
     const resolved = path.resolve(repoPath);
+    const normalizedProjectId = normalizeProjectId(projectId);
 
     // Already watching this exact repo — don't restart (preserve pending debounce)
     if (watcher && watchedRepoPath === resolved) {
+      if (normalizedProjectId) watchedProjectId = normalizedProjectId;
       log("Already watching", resolved, "— skipping restart.");
-      return { watching: true, repoPath: resolved };
+      return { watching: true, repoPath: resolved, projectId: watchedProjectId };
     }
 
     if (watcher) {
@@ -64,6 +109,7 @@ function createFileWatcherService({ repoService, processService, p2pService, git
     }
 
     watchedRepoPath = resolved;
+    watchedProjectId = normalizedProjectId;
     paused = false;
     syncing = false;
 
@@ -98,7 +144,7 @@ function createFileWatcherService({ repoService, processService, p2pService, git
         const relative = filename.replace(/\//g, path.sep);
         if (shouldIgnore(relative)) return;
 
-        sendEvent("fileWatcher:changed", { eventType, filePath: relative });
+        emitEvent("fileWatcher:changed", { eventType, filePath: relative });
 
         // Reset debounce timer
         if (debounceTimer) clearTimeout(debounceTimer);
@@ -112,12 +158,14 @@ function createFileWatcherService({ repoService, processService, p2pService, git
       });
     } catch (err) {
       log("Failed to start watcher:", err?.message);
+      watchedRepoPath = null;
+      watchedProjectId = null;
       return { watching: false, error: err?.message };
     }
 
-    sendEvent("fileWatcher:status", { watching: true, repoPath: watchedRepoPath });
+    emitEvent("fileWatcher:status", { watching: true, repoPath: watchedRepoPath, projectId: watchedProjectId });
     log("Watcher started.");
-    return { watching: true, repoPath: watchedRepoPath };
+    return { watching: true, repoPath: watchedRepoPath, projectId: watchedProjectId };
   }
 
   async function stopWatching() {
@@ -133,10 +181,11 @@ function createFileWatcherService({ repoService, processService, p2pService, git
     }
 
     watchedRepoPath = null;
+    watchedProjectId = null;
     paused = false;
     syncing = false;
 
-    sendEvent("fileWatcher:status", { watching: false, repoPath: null });
+    emitEvent("fileWatcher:status", { watching: false, repoPath: null, projectId: null });
     log("Watcher stopped.");
     return { watching: false };
   }
@@ -161,6 +210,7 @@ function createFileWatcherService({ repoService, processService, p2pService, git
     return {
       watching: Boolean(watcher),
       repoPath: watchedRepoPath,
+      projectId: watchedProjectId,
       paused,
       syncing,
     };
@@ -267,7 +317,7 @@ function createFileWatcherService({ repoService, processService, p2pService, git
     }
 
     syncing = true;
-    sendEvent("fileWatcher:syncStart", { repoPath: watchedRepoPath });
+    emitEvent("fileWatcher:syncStart", { repoPath: watchedRepoPath, branch: "codebuddy-build" });
 
     try {
       await queue.enqueue(watchedRepoPath, "auto-sync", () => doAutoSyncInner());
@@ -294,6 +344,17 @@ function createFileWatcherService({ repoService, processService, p2pService, git
         currentBranch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf8", env: gitEnv }).trim();
       } catch {
         log("Could not determine current branch — aborting auto-sync.");
+        emitEvent("fileWatcher:syncComplete", {
+          repoPath: watchedRepoPath,
+          branch: "codebuddy-build",
+          success: false,
+          error: "Could not determine current branch.",
+        });
+        recordActivity({
+          title: "Workspace sync failed",
+          description: "Could not determine the current Git branch.",
+          relatedFile: "codebuddy-build",
+        });
         return;
       }
 
@@ -341,6 +402,17 @@ function createFileWatcherService({ repoService, processService, p2pService, git
           log(`Switched ${currentBranch} → codebuddy-build for auto-sync.`);
         } catch (switchErr) {
           log(`Could not switch to codebuddy-build: ${switchErr.message} — skipping auto-sync.`);
+          emitEvent("fileWatcher:syncComplete", {
+            repoPath: watchedRepoPath,
+            branch: "codebuddy-build",
+            success: false,
+            error: switchErr.message,
+          });
+          recordActivity({
+            title: "Workspace sync failed",
+            description: `Could not switch to codebuddy-build: ${shortError(switchErr.message)}`,
+            relatedFile: "codebuddy-build",
+          });
           return;
         }
       }
@@ -348,6 +420,13 @@ function createFileWatcherService({ repoService, processService, p2pService, git
       // Check if there are actually any changes to commit
       const status = execSync("git status --porcelain", { cwd, encoding: "utf8", env: gitEnv }).trim();
       if (!status) {
+        emitEvent("fileWatcher:syncComplete", {
+          repoPath: watchedRepoPath,
+          branch: "codebuddy-build",
+          success: true,
+          skipped: true,
+          reason: "No local changes to sync.",
+        });
         return;
       }
 
@@ -363,6 +442,13 @@ function createFileWatcherService({ repoService, processService, p2pService, git
       } catch (commitErr) {
         // "nothing to commit" is fine
         if (commitErr.message?.includes("nothing to commit")) {
+          emitEvent("fileWatcher:syncComplete", {
+            repoPath: watchedRepoPath,
+            branch: "codebuddy-build",
+            success: true,
+            skipped: true,
+            reason: "Nothing to commit.",
+          });
           return;
         }
         throw commitErr;
@@ -429,24 +515,43 @@ function createFileWatcherService({ repoService, processService, p2pService, git
       }
 
       // Broadcast new-commits to P2P peers
-      if (p2pService && typeof p2pService.broadcastStateChange === "function") {
-        p2pService.broadcastStateChange("new-commits", "codebuddy-build", {
+      if (broadcastProjectStateChange("new-commits", "codebuddy-build", {
           branch: "codebuddy-build",
           commitMessage: commitMsg,
           pushedAt: new Date().toISOString(),
-        });
+        })) {
         log("Broadcast new-commits to P2P peers.");
       }
 
-      sendEvent("fileWatcher:syncComplete", { repoPath: watchedRepoPath, commitMessage: commitMsg, success: true });
+      emitEvent("fileWatcher:syncComplete", {
+        repoPath: watchedRepoPath,
+        branch: "codebuddy-build",
+        commitMessage: commitMsg,
+        success: true,
+      });
+      recordActivity({
+        title: "Workspace synced",
+        description: "Pushed latest local changes to codebuddy-build.",
+        relatedFile: "codebuddy-build",
+      });
     } catch (err) {
       log("Auto-sync error:", err?.message);
-      sendEvent("fileWatcher:syncComplete", { repoPath: watchedRepoPath, success: false, error: err?.message });
+      emitEvent("fileWatcher:syncComplete", {
+        repoPath: watchedRepoPath,
+        branch: "codebuddy-build",
+        success: false,
+        error: err?.message,
+      });
+      recordActivity({
+        title: "Workspace sync failed",
+        description: shortError(err?.message),
+        relatedFile: "codebuddy-build",
+      });
     }
   }
 
   /** Manually trigger a push-to-main: merge codebuddy-build → main, push main, switch back */
-  async function pushToMain(repoPath) {
+  async function pushToMain(repoPath, projectId = null) {
     const cwd = path.resolve(repoPath);
     const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
     const { execSync } = require("child_process");
@@ -493,11 +598,10 @@ function createFileWatcherService({ repoService, processService, p2pService, git
       log("Push to main complete — back on codebuddy-build.");
 
       // Broadcast main-updated to P2P peers so they can fetch the latest main
-      if (p2pService && typeof p2pService.broadcastStateChange === "function") {
-        p2pService.broadcastStateChange("main-updated", "main", {
+      if (broadcastProjectStateChange("main-updated", "main", {
           branch: "main",
           pushedAt: new Date().toISOString(),
-        });
+        }, projectId)) {
         log("Broadcast main-updated to P2P peers.");
       }
 
@@ -521,6 +625,7 @@ function createFileWatcherService({ repoService, processService, p2pService, git
     const { execSync } = require("child_process");
 
     log("Auto-pull starting...");
+    emitEvent("fileWatcher:pullStart", { repoPath: cwd, branch: "codebuddy-build" });
 
     // Clean up any stuck git state before pulling
     cleanupGitState(cwd);
@@ -540,6 +645,17 @@ function createFileWatcherService({ repoService, processService, p2pService, git
         log(`Auto-pull: current branch is "${currentBranch}".`);
       } catch (branchErr) {
         log("Cannot determine branch — aborting auto-pull.", branchErr?.message);
+        emitEvent("fileWatcher:pullComplete", {
+          repoPath: cwd,
+          branch: "codebuddy-build",
+          success: false,
+          error: "Cannot determine current branch.",
+        });
+        recordActivity({
+          title: "Team sync failed",
+          description: "Could not determine the current Git branch.",
+          relatedFile: "codebuddy-build",
+        });
         return { success: false, message: "Cannot determine current branch." };
       }
 
@@ -564,14 +680,24 @@ function createFileWatcherService({ repoService, processService, p2pService, git
         try {
           execSync("git fetch origin codebuddy-build:codebuddy-build", { cwd, encoding: "utf8", env: gitEnv, timeout: 60000 });
           log("Fetched codebuddy-build (updated local ref without switching).");
-        } catch (fetchErr) {
+        } catch {
           // If fast-forward fetch fails, just do a plain fetch
           try {
             execSync("git fetch origin codebuddy-build", { cwd, encoding: "utf8", env: gitEnv, timeout: 60000 });
             log("Fetched codebuddy-build remote ref.");
           } catch { /* ignore */ }
         }
-        sendEvent("fileWatcher:pullComplete", { repoPath: cwd, success: true });
+        emitEvent("fileWatcher:pullComplete", {
+          repoPath: cwd,
+          branch: "codebuddy-build",
+          success: true,
+          message: "Fetched codebuddy-build while another branch is checked out.",
+        });
+        recordActivity({
+          title: "Team changes fetched",
+          description: "Fetched codebuddy-build without switching your current branch.",
+          relatedFile: "codebuddy-build",
+        });
         return { success: true, message: "Fetched codebuddy-build (user viewing different branch)." };
       }
 
@@ -604,7 +730,17 @@ function createFileWatcherService({ repoService, processService, p2pService, git
           if (didStash) {
             try { execSync("git stash pop", { cwd, encoding: "utf8", env: gitEnv }); } catch { /* ignore */ }
           }
-          sendEvent("fileWatcher:pullComplete", { repoPath: cwd, success: false, error: pullErr?.message });
+          emitEvent("fileWatcher:pullComplete", {
+            repoPath: cwd,
+            branch: "codebuddy-build",
+            success: false,
+            error: pullErr?.message,
+          });
+          recordActivity({
+            title: "Team sync failed",
+            description: shortError(pullErr?.message),
+            relatedFile: "codebuddy-build",
+          });
           return { success: false, message: pullErr?.message || "Auto-pull failed." };
         }
       }
@@ -623,11 +759,31 @@ function createFileWatcherService({ repoService, processService, p2pService, git
         }
       }
 
-      sendEvent("fileWatcher:pullComplete", { repoPath: cwd, success: true });
+      emitEvent("fileWatcher:pullComplete", {
+        repoPath: cwd,
+        branch: "codebuddy-build",
+        success: true,
+        message: "Pulled latest changes from codebuddy-build.",
+      });
+      recordActivity({
+        title: "Team changes applied",
+        description: "Pulled latest codebuddy-build changes into your workspace.",
+        relatedFile: "codebuddy-build",
+      });
       return { success: true, message: "Pulled latest changes from codebuddy-build." };
     } catch (err) {
       log("Auto-pull error:", err?.message);
-      sendEvent("fileWatcher:pullComplete", { repoPath: cwd, success: false, error: err?.message });
+      emitEvent("fileWatcher:pullComplete", {
+        repoPath: cwd,
+        branch: "codebuddy-build",
+        success: false,
+        error: err?.message,
+      });
+      recordActivity({
+        title: "Team sync failed",
+        description: shortError(err?.message),
+        relatedFile: "codebuddy-build",
+      });
       return { success: false, message: err?.message || "Auto-pull failed." };
     } finally {
       // Resume watcher with a small delay to let filesystem settle
@@ -645,6 +801,12 @@ function createFileWatcherService({ repoService, processService, p2pService, git
   }
 
   return {
+    __setEventSender(nextSendEvent) {
+      emit = typeof nextSendEvent === "function" ? nextSendEvent : () => undefined;
+    },
+    __setActivityService(nextActivityService) {
+      activity = nextActivityService || null;
+    },
     startWatching,
     stopWatching,
     pauseWatching,

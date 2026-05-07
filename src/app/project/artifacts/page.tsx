@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
 
@@ -142,20 +142,6 @@ function extractGeneratedFiles(sessions: SoloSession[]): GeneratedFile[] {
   return files;
 }
 
-function formatRelativeTime(date: string): string {
-  const d = new Date(date);
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffMinutes = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMinutes / 60);
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffMinutes < 1) return "Just now";
-  if (diffMinutes < 60) return `${diffMinutes}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays < 7) return `${diffDays}d ago`;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
 /* ------------------------------------------------------------------ */
 /*  Page                                                               */
 /* ------------------------------------------------------------------ */
@@ -215,7 +201,7 @@ export default function DownloadsPage() {
     }
 
     return allSessions;
-  }, [activeProject?.dashboard]);
+  }, [activeProject]);
 
   const generatedFiles = useMemo(() => extractGeneratedFiles(sessions), [sessions]);
 

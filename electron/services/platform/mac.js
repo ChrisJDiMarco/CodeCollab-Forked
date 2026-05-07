@@ -234,7 +234,22 @@ function getPythonCandidatePaths() {
     "/opt/homebrew/bin/python3",
     "/usr/local/bin/python3",
     "/usr/bin/python3",
+    "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
   ];
+  try {
+    const frameworkVersions = "/Library/Frameworks/Python.framework/Versions";
+    if (fs.existsSync(frameworkVersions)) {
+      const versions = fs.readdirSync(frameworkVersions)
+        .filter((entry) => entry !== "Current")
+        .sort()
+        .reverse();
+      for (const version of versions) {
+        candidates.push(path.join(frameworkVersions, version, "bin", "python3"));
+      }
+    }
+  } catch {
+    /* skip */
+  }
   // pyenv-managed versions
   try {
     const pyenv = path.join(os.homedir(), ".pyenv", "versions");

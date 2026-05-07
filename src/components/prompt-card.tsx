@@ -146,7 +146,7 @@ export default function PromptCard({
         break;
       }
     }
-  }, [currentModel, hasRichCatalog]);
+  }, [currentModel, enabledProviders, hasRichCatalog, modelCatalog]);
 
   // Click-outside for model menu
   useEffect(() => {

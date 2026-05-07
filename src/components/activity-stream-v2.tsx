@@ -178,7 +178,7 @@ function MarkdownTable({ lines }: { lines: string[] }) {
 
 // ─── Body renderer ────────────────────────────────────────────
 
-function EventBody({ body, kind }: { body: string; kind: ActivityKind }) {
+function EventBody({ body }: { body: string; kind: ActivityKind }) {
   const lines = body.split("\n");
   const elements: React.ReactNode[] = [];
   let idx = 0;

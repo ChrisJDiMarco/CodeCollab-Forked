@@ -3,6 +3,7 @@ const { promisify } = require("util");
 const fs = require("fs");
 const path = require("path");
 const copilotCatalogService = require("./copilot-catalog-service");
+const platform = require("./platform");
 
 const execFileAsync = promisify(execFile);
 
@@ -108,6 +109,23 @@ function createToolingService({ processService, settingsService }) {
     return command;
   }
 
+  function pathSeparator() {
+    return process.platform === "win32" ? ";" : ":";
+  }
+
+  function addRuntimePath(dir) {
+    if (!dir) return;
+    extraPaths.add(dir);
+    const currentPath = process.env.PATH || "";
+    const entries = currentPath.split(pathSeparator()).filter(Boolean);
+    if (!entries.includes(dir)) {
+      process.env.PATH = [dir, ...entries].join(pathSeparator());
+      if (process.platform === "win32") {
+        process.env.Path = process.env.PATH;
+      }
+    }
+  }
+
   /**
    * On Windows, re-read the current System + User PATH from the registry
    * so that tools installed *after* the app launched are found.
@@ -210,16 +228,13 @@ function createToolingService({ processService, settingsService }) {
       // 3. Probe known install directories directly (bypass PATH)
       for (const knownDir of knownPaths) {
         if (!knownDir || !fs.existsSync(knownDir)) continue;
-        const exeName = `${command}.exe`;
+        const exeName = process.platform === "win32" ? `${command}.exe` : command;
         const fullPath = path.join(knownDir, exeName);
         if (fs.existsSync(fullPath)) {
           const probeResult = await tryExec(fullPath, args, process.cwd());
           if (probeResult.ok) {
             addLog(`  Found at known path ${fullPath}: ${probeResult.stdout}`);
-            extraPaths.add(knownDir);
-            if (!process.env.PATH.includes(knownDir)) {
-              process.env.PATH = knownDir + ";" + process.env.PATH;
-            }
+            addRuntimePath(knownDir);
             return { found: true, stdout: probeResult.stdout, addedPath: knownDir };
           }
         }
@@ -236,6 +251,205 @@ function createToolingService({ processService, settingsService }) {
   async function getConfiguredCommands() {
     const settings = await settingsService.readSettings();
     return settings.cliTools ?? {};
+  }
+
+  async function findPythonInstallation(configuredCommand, addLog = () => undefined) {
+    const commands = [];
+    if (configuredCommand) {
+      commands.push(configuredCommand);
+    } else if (process.platform === "win32") {
+      commands.push(getCommandName("python"));
+    } else {
+      commands.push("python3", "python");
+    }
+
+    for (const command of [...new Set(commands)]) {
+      addLog(`Checking ${command} --version...`);
+      const result = await tryExec(command, ["--version"], process.cwd());
+      if (result.ok) {
+        addLog(`Found ${command}: ${result.stdout || result.stderr}`);
+        return { found: true, command, detail: (result.stdout || result.stderr).trim() };
+      }
+    }
+
+    if (process.platform === "win32") {
+      for (const dir of KNOWN_INSTALL_PATHS.python) {
+        if (!dir) continue;
+        const pythonExe = path.join(dir, "python.exe");
+        if (fs.existsSync(pythonExe)) {
+          const check = await tryExec(pythonExe, ["--version"], process.cwd());
+          if (check.ok) {
+            addLog(`Found at ${pythonExe}: ${check.stdout || check.stderr}`);
+            addRuntimePath(dir);
+            return { found: true, command: pythonExe, detail: (check.stdout || check.stderr).trim() };
+          }
+        }
+      }
+    }
+
+    const candidates = typeof platform.getPythonCandidatePaths === "function"
+      ? platform.getPythonCandidatePaths()
+      : [];
+    for (const candidate of candidates) {
+      if (!candidate || !fs.existsSync(candidate)) continue;
+      const check = await tryExec(candidate, ["--version"], process.cwd());
+      if (check.ok) {
+        addLog(`Found at ${candidate}: ${check.stdout || check.stderr}`);
+        addRuntimePath(path.dirname(candidate));
+        return { found: true, command: candidate, detail: (check.stdout || check.stderr).trim() };
+      }
+    }
+
+    return { found: false, command: configuredCommand || (process.platform === "win32" ? "python" : "python3"), detail: "" };
+  }
+
+  async function findKnownCommandLocation(command, args) {
+    if (typeof platform.getKnownCommandLocations !== "function") {
+      return { found: false, command, detail: "" };
+    }
+
+    for (const candidate of platform.getKnownCommandLocations(command)) {
+      if (!candidate || !fs.existsSync(candidate)) continue;
+      const result = await tryExec(candidate, args, process.cwd());
+      if (result.ok) {
+        addRuntimePath(path.dirname(candidate));
+        return {
+          found: true,
+          command: candidate,
+          detail: (result.stdout || result.stderr).trim(),
+        };
+      }
+    }
+
+    return { found: false, command, detail: "" };
+  }
+
+  async function findCopilotInvocation(configuredCommands = {}, addLog = () => undefined) {
+    const directCommands = [];
+    if (configuredCommands.copilot) directCommands.push(configuredCommands.copilot);
+    directCommands.push(getCommandName("copilot"), "copilot");
+
+    for (const command of [...new Set(directCommands)]) {
+      addLog(`Checking ${command} --version...`);
+      const result = await tryExec(command, ["--version"], process.cwd());
+      if (result.ok) {
+        const detail = (result.stdout || result.stderr || "GitHub Copilot CLI").trim();
+        return { found: true, command, argsPrefix: [], displayCommand: command, detail };
+      }
+    }
+
+    const directLocated = await findKnownCommandLocation("copilot", ["--version"]);
+    if (directLocated.found) {
+      return {
+        found: true,
+        command: directLocated.command,
+        argsPrefix: [],
+        displayCommand: directLocated.command,
+        detail: directLocated.detail || "GitHub Copilot CLI",
+      };
+    }
+
+    const ghCommands = [];
+    if (configuredCommands.githubCli) ghCommands.push(configuredCommands.githubCli);
+    ghCommands.push(getCommandName("gh"), "gh");
+
+    for (const ghCommand of [...new Set(ghCommands)]) {
+      addLog(`Checking ${ghCommand} copilot --help...`);
+      const result = await tryExec(ghCommand, ["copilot", "--help"], process.cwd(), { timeout: 30000 });
+      if (result.ok) {
+        return {
+          found: true,
+          command: ghCommand,
+          argsPrefix: ["copilot"],
+          displayCommand: `${ghCommand} copilot`,
+          detail: "GitHub Copilot CLI via gh",
+        };
+      }
+    }
+
+    return {
+      found: false,
+      command: configuredCommands.copilot || configuredCommands.githubCli || getCommandName("gh"),
+      argsPrefix: [],
+      displayCommand: configuredCommands.copilot || `${configuredCommands.githubCli || getCommandName("gh")} copilot`,
+      detail: "",
+    };
+  }
+
+  async function resolvePromptCommand({ label, command, probeArgs, searchCommand }) {
+    await refreshSystemPath();
+    const result = await tryExec(command, probeArgs, process.cwd(), { timeout: 30000 });
+    if (result.ok) {
+      return command;
+    }
+
+    if (searchCommand && command === searchCommand) {
+      const located = await findKnownCommandLocation(searchCommand, probeArgs);
+      if (located.found) {
+        return located.command;
+      }
+    }
+
+    const detail = result.stderr || result.message || result.stdout || "command not found";
+    throw new Error(`${label} is not ready. Install or reconnect it from Onboarding or Settings, then try again. (${detail})`);
+  }
+
+  function knownCommandDirs(command) {
+    if (typeof platform.getKnownCommandLocations !== "function") {
+      return [];
+    }
+
+    return Array.from(
+      new Set(
+        platform.getKnownCommandLocations(command)
+          .filter(Boolean)
+          .map((candidate) => path.dirname(candidate)),
+      ),
+    );
+  }
+
+  async function installWithHomebrew({ label, formula, command, args, knownPaths, restartDetail, manualDetail, addLog }) {
+    addLog(`${label} was not found. Trying Homebrew install (${formula})...`);
+    let brewCommand = "brew";
+    let brewCheck = await tryExec(brewCommand, ["--version"], process.cwd());
+    if (!brewCheck.ok) {
+      const knownBrew = await findKnownCommandLocation("brew", ["--version"]);
+      if (knownBrew.found) {
+        brewCommand = knownBrew.command;
+        brewCheck = { ok: true, stdout: knownBrew.detail, stderr: "" };
+        addLog(`Found Homebrew at ${knownBrew.command}: ${knownBrew.detail}`);
+      }
+    }
+    if (!brewCheck.ok) {
+      return {
+        success: false,
+        detail: manualDetail || `${label} was not found. Install Homebrew, then run: brew install ${formula}`,
+      };
+    }
+
+    const install = await tryExec(brewCommand, ["install", formula], process.cwd(), { timeout: 300000 });
+    addLog(`brew stdout: ${install.stdout}`);
+    addLog(`brew stderr: ${install.stderr}`);
+    addLog(`brew ok: ${install.ok}`);
+
+    const pollResult = await waitForToolOnPath({
+      command,
+      args,
+      knownPaths: knownPaths || knownCommandDirs(command),
+      maxWaitMs: 60000,
+      intervalMs: 3000,
+      addLog,
+    });
+
+    if (pollResult.found) {
+      return { success: true, detail: pollResult.stdout.trim() };
+    }
+
+    if (install.ok || /already installed|successfully installed/i.test(`${install.stdout}\n${install.stderr}`)) {
+      return { success: true, detail: restartDetail || `${label} installed. Restart CodeCollab if it is not detected yet.` };
+    }
+
+    return { success: false, detail: `${label} install failed. Try: brew install ${formula}` };
   }
 
   async function getToolStatus() {
@@ -284,7 +498,7 @@ function createToolingService({ processService, settingsService }) {
       {
         id: "python",
         label: "Python",
-        command: configuredCommands.python || getCommandName("python"),
+        command: configuredCommands.python || (process.platform === "win32" ? getCommandName("python") : "python3"),
         args: ["--version"],
       },
       {
@@ -298,6 +512,7 @@ function createToolingService({ processService, settingsService }) {
     const statuses = [];
     for (const definition of definitions) {
       let result = await tryExec(definition.command, definition.args, process.cwd());
+      let resolvedCommand = definition.command;
       // On Windows, npm-installed CLIs are .cmd files — try explicit .cmd if direct exec fails
       if (!result.ok && process.platform === "win32" && !definition.command.endsWith(".cmd")) {
         const cmdResult = await tryExec(definition.command + ".cmd", definition.args, process.cwd());
@@ -321,6 +536,7 @@ function createToolingService({ processService, settingsService }) {
               const probeResult = await tryExec(fullPath, definition.args, process.cwd());
               if (probeResult.ok) {
                 result = probeResult;
+                resolvedCommand = fullPath;
                 extraPaths.add(dir);
                 if (!process.env.PATH.includes(dir)) {
                   process.env.PATH = dir + ";" + process.env.PATH;
@@ -329,6 +545,27 @@ function createToolingService({ processService, settingsService }) {
               }
             }
           }
+        }
+      }
+      if (!result.ok && definition.id === "python") {
+        const python = await findPythonInstallation(configuredCommands.python);
+        if (python.found) {
+          result = { ok: true, stdout: python.detail, stderr: "" };
+          resolvedCommand = python.command;
+        }
+      }
+      if (!result.ok && definition.id === "githubCopilotCli") {
+        const copilot = await findCopilotInvocation(configuredCommands);
+        if (copilot.found) {
+          result = { ok: true, stdout: copilot.detail, stderr: "" };
+          resolvedCommand = copilot.displayCommand;
+        }
+      }
+      if (!result.ok) {
+        const located = await findKnownCommandLocation(definition.command, definition.args);
+        if (located.found) {
+          result = { ok: true, stdout: located.detail, stderr: "" };
+          resolvedCommand = located.command;
         }
       }
       // For codexCli specifically, also try the npm bin directory directly
@@ -358,7 +595,7 @@ function createToolingService({ processService, settingsService }) {
         id: definition.id,
         label: definition.label,
         available: result.ok,
-        command: definition.command,
+        command: resolvedCommand,
         detail: result.ok ? result.stdout || result.stderr || "Ready" : result.stderr || result.message || "Not available",
       });
     }
@@ -376,8 +613,12 @@ function createToolingService({ processService, settingsService }) {
     }
 
     const configuredCommands = await getConfiguredCommands();
-    const githubCliCommand = configuredCommands.githubCli || getCommandName("gh");
-    const args = ["copilot", "-p", prompt.trim()];
+    const copilot = await findCopilotInvocation(configuredCommands);
+    if (!copilot.found) {
+      throw new Error("GitHub Copilot CLI is not ready. Install it from Onboarding or Settings, then try again.");
+    }
+
+    const args = [...copilot.argsPrefix, "-p", prompt.trim()];
 
     if (typeof model === "string" && model.trim() && model.trim() !== "auto") {
       args.push("--model", model.trim());
@@ -389,7 +630,7 @@ function createToolingService({ processService, settingsService }) {
       }
     }
 
-    return processService.runProgram(githubCliCommand, args, cwd, { timeoutMs });
+    return processService.runProgram(copilot.command, args, cwd, { timeoutMs });
   }
 
   /* ─── Generic provider-aware prompt (freestyle chat) ─── */
@@ -429,7 +670,12 @@ function createToolingService({ processService, settingsService }) {
     console.log(`[runGenericPrompt] model="${selectedModel}", provider="${provider}"`);
 
     if (provider === "claude") {
-      const claudeCmd = resolveClaudeCmd(settings.cliTools?.claudeCode);
+      const claudeCmd = await resolvePromptCommand({
+        label: "Claude Code",
+        command: resolveClaudeCmd(settings.cliTools?.claudeCode),
+        probeArgs: ["--help"],
+        searchCommand: "claude",
+      });
       const args = ["-p", prompt.trim(), "--dangerously-skip-permissions"];
       if (selectedModel && selectedModel !== "auto") {
         args.push("--model", selectedModel);
@@ -438,7 +684,12 @@ function createToolingService({ processService, settingsService }) {
     }
 
     if (provider === "codex") {
-      const codexCmd = settings.cliTools?.codexCli || getCommandName("codex");
+      const codexCmd = await resolvePromptCommand({
+        label: "Codex CLI",
+        command: settings.cliTools?.codexCli || getCommandName("codex"),
+        probeArgs: ["--version"],
+        searchCommand: getCommandName("codex"),
+      });
       // Codex needs stdin for the prompt on Windows (EINVAL with long args)
       const args = ["exec", "-s", "danger-full-access"];
       if (selectedModel && selectedModel !== "auto" && selectedModel !== "default") {
@@ -447,14 +698,7 @@ function createToolingService({ processService, settingsService }) {
       return processService.runProgram(codexCmd, args, cwd, { timeoutMs, stdinData: prompt.trim() });
     }
 
-    // Copilot (default)
-    const configuredCommands = await getConfiguredCommands();
-    const ghCmd = configuredCommands.githubCli || getCommandName("gh");
-    const args = ["copilot", "-p", prompt.trim()];
-    if (selectedModel && selectedModel !== "auto") {
-      args.push("--model", selectedModel);
-    }
-    return processService.runProgram(ghCmd, args, cwd, { timeoutMs });
+    return runCopilotPrompt({ prompt, cwd, timeoutMs, model: selectedModel });
   }
 
   /* ─── GitHub Auth ─── */
@@ -577,8 +821,6 @@ function createToolingService({ processService, settingsService }) {
     while ((match = accountRegex.exec(output)) !== null) {
       accounts.push({ host: match[1], username: match[2] });
     }
-    // Determine which is active
-    const activeMatch = output.match(/Active account:\s*true/i);
     // For single-account setups, the one account is active
     // For multi-account, active comes after the account line
     const lines = output.split("\n");
@@ -627,6 +869,13 @@ function createToolingService({ processService, settingsService }) {
       return { success: true, detail: existing.stdout, log };
     }
     addLog(`Not on PATH. stdout: ${existing.stdout}, stderr: ${existing.stderr}, message: ${existing.message}`);
+
+    const configuredCommands = await getConfiguredCommands();
+    const existingInvocation = await findCopilotInvocation(configuredCommands, addLog);
+    if (existingInvocation.found) {
+      addLog(`Already available: ${existingInvocation.displayCommand}`);
+      return { success: true, detail: existingInvocation.detail, log };
+    }
 
     // ── Step 2: Search known install locations ──
     addLog("Step 2: Searching known install locations...");
@@ -846,7 +1095,6 @@ function createToolingService({ processService, settingsService }) {
 
     // ── Step 5: Try gh extension install (older gh versions) ──
     addLog("Step 5: Trying gh extension install github/gh-copilot...");
-    const configuredCommands = await getConfiguredCommands();
     const ghCmd = configuredCommands.githubCli || getCommandName("gh");
     const ghCheck = await tryExec(ghCmd, ["--version"], process.cwd());
     if (ghCheck.ok) {
@@ -940,6 +1188,12 @@ function createToolingService({ processService, settingsService }) {
       return { success: true, detail: existing.stdout.trim(), log };
     }
 
+    const knownNode = await findKnownCommandLocation("node", ["--version"]);
+    if (knownNode.found) {
+      addLog(`Found at ${knownNode.command} (not on PATH): ${knownNode.detail}`);
+      return { success: true, detail: knownNode.detail, log };
+    }
+
     // Check known install dirs before installing
     for (const dir of KNOWN_INSTALL_PATHS.node) {
       const nodeExe = path.join(dir, "node.exe");
@@ -954,6 +1208,27 @@ function createToolingService({ processService, settingsService }) {
           return { success: true, detail: check.stdout.trim(), log };
         }
       }
+    }
+
+    if (process.platform === "darwin") {
+      const result = await installWithHomebrew({
+        label: "Node.js",
+        formula: "node",
+        command: "node",
+        args: ["--version"],
+        restartDetail: "Node.js installed. Restart CodeCollab if it is not detected yet.",
+        manualDetail: "Node.js was not found. Install Homebrew, then run: brew install node",
+        addLog,
+      });
+      return { ...result, log };
+    }
+
+    if (process.platform !== "win32") {
+      return {
+        success: false,
+        detail: "Node.js was not found. Install Node.js with your package manager, then re-check.",
+        log,
+      };
     }
 
     // Try winget (serialized — only one winget install at a time)
@@ -999,7 +1274,7 @@ function createToolingService({ processService, settingsService }) {
     return { success: false, detail: "Install failed. Try manually from nodejs.org", log };
   }
 
-  /* ─── Python install (winget) ─── */
+  /* ─── Python install ─── */
 
   async function installPython() {
     const log = [];
@@ -1007,28 +1282,54 @@ function createToolingService({ processService, settingsService }) {
 
     await refreshSystemPath();
 
-    addLog("Checking if python is already on PATH...");
-    const existing = await tryExec("python", ["--version"], process.cwd());
-    if (existing.ok) {
-      addLog(`Already installed: ${existing.stdout}`);
-      return { success: true, detail: existing.stdout.trim(), log };
+    const configuredCommands = await getConfiguredCommands();
+    const existing = await findPythonInstallation(configuredCommands.python, addLog);
+    if (existing.found) {
+      return { success: true, detail: existing.detail, log };
     }
 
-    // Check known install dirs before installing
-    for (const dir of KNOWN_INSTALL_PATHS.python) {
-      if (!dir) continue;
-      const pythonExe = path.join(dir, "python.exe");
-      if (fs.existsSync(pythonExe)) {
-        const check = await tryExec(pythonExe, ["--version"], process.cwd());
-        if (check.ok) {
-          addLog(`Found at ${pythonExe} (not on PATH): ${check.stdout}`);
-          extraPaths.add(dir);
-          if (!process.env.PATH.includes(dir)) {
-            process.env.PATH = dir + ";" + process.env.PATH;
-          }
-          return { success: true, detail: check.stdout.trim(), log };
-        }
+    if (process.platform === "darwin") {
+      addLog("Python was not found as python3. Trying Homebrew install...");
+      const brewCheck = await tryExec("brew", ["--version"], process.cwd());
+      if (!brewCheck.ok) {
+        return {
+          success: false,
+          detail: "Python was not found. Install Homebrew, then run: brew install python",
+          log,
+        };
       }
+
+      const install = await tryExec("brew", ["install", "python"], process.cwd(), { timeout: 300000 });
+      addLog(`brew stdout: ${install.stdout}`);
+      addLog(`brew stderr: ${install.stderr}`);
+      addLog(`brew ok: ${install.ok}`);
+
+      const pollResult = await waitForToolOnPath({
+        command: "python3",
+        args: ["--version"],
+        knownPaths: platform.getPythonCandidatePaths().map((candidate) => path.dirname(candidate)),
+        maxWaitMs: 60000,
+        intervalMs: 3000,
+        addLog,
+      });
+
+      if (pollResult.found) {
+        return { success: true, detail: pollResult.stdout.trim(), log };
+      }
+
+      if (install.ok || /already installed|successfully installed/i.test(`${install.stdout}\n${install.stderr}`)) {
+        return { success: true, detail: "Python installed. Restart CodeCollab if it is not detected yet.", log };
+      }
+
+      return { success: false, detail: "Homebrew Python install failed. Try: brew install python", log };
+    }
+
+    if (process.platform !== "win32") {
+      return {
+        success: false,
+        detail: "Python was not found. Install Python 3 with your package manager, then re-check.",
+        log,
+      };
     }
 
     addLog("Installing via winget (Python.Python.3.12)...");
@@ -1228,6 +1529,12 @@ function createToolingService({ processService, settingsService }) {
       return { success: true, detail: existing.stdout.trim(), log };
     }
 
+    const knownGit = await findKnownCommandLocation("git", ["--version"]);
+    if (knownGit.found) {
+      addLog(`Found at ${knownGit.command} (not on PATH): ${knownGit.detail}`);
+      return { success: true, detail: knownGit.detail, log };
+    }
+
     // Check known install dirs before installing (may already be present but not on PATH)
     for (const dir of KNOWN_INSTALL_PATHS.git) {
       const gitExe = path.join(dir, "git.exe");
@@ -1242,6 +1549,27 @@ function createToolingService({ processService, settingsService }) {
           return { success: true, detail: check.stdout.trim(), log };
         }
       }
+    }
+
+    if (process.platform === "darwin") {
+      const result = await installWithHomebrew({
+        label: "Git",
+        formula: "git",
+        command: "git",
+        args: ["--version"],
+        restartDetail: "Git installed. Restart CodeCollab if it is not detected yet.",
+        manualDetail: "Git was not found. Run xcode-select --install, or install Homebrew and run: brew install git",
+        addLog,
+      });
+      return { ...result, log };
+    }
+
+    if (process.platform !== "win32") {
+      return {
+        success: false,
+        detail: "Git was not found. Install Git with your package manager, then re-check.",
+        log,
+      };
     }
 
     addLog("Installing via winget (Git.Git)...");
@@ -1301,6 +1629,12 @@ function createToolingService({ processService, settingsService }) {
       return { success: true, detail: existing.stdout.trim(), log };
     }
 
+    const knownGh = await findKnownCommandLocation("gh", ["--version"]);
+    if (knownGh.found) {
+      addLog(`Found at ${knownGh.command} (not on PATH): ${knownGh.detail}`);
+      return { success: true, detail: knownGh.detail, log };
+    }
+
     // Check known install dirs before installing
     for (const dir of KNOWN_INSTALL_PATHS.gh) {
       const ghExe = path.join(dir, "gh.exe");
@@ -1315,6 +1649,27 @@ function createToolingService({ processService, settingsService }) {
           return { success: true, detail: check.stdout.trim(), log };
         }
       }
+    }
+
+    if (process.platform === "darwin") {
+      const result = await installWithHomebrew({
+        label: "GitHub CLI",
+        formula: "gh",
+        command: "gh",
+        args: ["--version"],
+        restartDetail: "GitHub CLI installed. Restart CodeCollab if it is not detected yet.",
+        manualDetail: "GitHub CLI was not found. Install Homebrew, then run: brew install gh",
+        addLog,
+      });
+      return { ...result, log };
+    }
+
+    if (process.platform !== "win32") {
+      return {
+        success: false,
+        detail: "GitHub CLI was not found. Install gh with your package manager, then re-check.",
+        log,
+      };
     }
 
     addLog("Installing via winget (GitHub.cli)...");

@@ -188,6 +188,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     onStatus: (callback) => subscribe("fileWatcher:status", callback),
     onSyncStart: (callback) => subscribe("fileWatcher:syncStart", callback),
     onSyncComplete: (callback) => subscribe("fileWatcher:syncComplete", callback),
+    onPullStart: (callback) => subscribe("fileWatcher:pullStart", callback),
     onPullComplete: (callback) => subscribe("fileWatcher:pullComplete", callback),
     onPeerSync: (callback) => subscribe("fileWatcher:peerSync", callback),
   },

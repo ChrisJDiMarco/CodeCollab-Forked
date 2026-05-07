@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Avatar } from "@/components";
 import { useTheme } from "@/components/theme-provider";
 
@@ -52,10 +52,6 @@ const claudeCodeModelOptions = [
   { id: "claude-sonnet-4-5", label: "Claude Sonnet 4.5", usage: "", provider: "Claude Code" },
   { id: "claude-opus-4-5", label: "Claude Opus 4.5", usage: "", provider: "Claude Code" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", usage: "", provider: "Claude Code" },
-];
-
-const codexModelOptions = [
-  { id: "default", label: "GPT-5.5 Codex (Latest)", usage: "", provider: "OpenAI" },
 ];
 
 interface GithubAccount {
@@ -119,7 +115,7 @@ export default function SettingsPage() {
   const activeAccount = useMemo(() => githubAccounts.find((a) => a.active), [githubAccounts]);
 
   /* ─── Load GitHub accounts ─── */
-  const loadGithubAccounts = async () => {
+  const loadGithubAccounts = useCallback(async () => {
     setGithubLoading(true);
     try {
       const accounts = await window.electronAPI?.tools?.githubListAccounts();
@@ -129,7 +125,7 @@ export default function SettingsPage() {
     } finally {
       setGithubLoading(false);
     }
-  };
+  }, []);
 
   const handleAddGithubAccount = async () => {
     setGithubAuthInProgress(true);
@@ -187,7 +183,7 @@ export default function SettingsPage() {
   };
 
   /* ─── Desktop integrations ─── */
-  const applyDesktopSettings = (s: DesktopSettings) => {
+  const applyDesktopSettings = useCallback((s: DesktopSettings) => {
     setDesktopSettings(s);
     setGithubCliPath(s.cliTools?.githubCli ?? "");
     setGitPath(s.cliTools?.git ?? "");
@@ -195,9 +191,9 @@ export default function SettingsPage() {
     setCreateGithubRepoByDefault(s.projectDefaults?.createGithubRepo ?? true);
     setProjectGithubVisibility(s.projectDefaults?.githubVisibility ?? "private");
     setCopilotModel(s.projectDefaults?.copilotModel ?? "gpt-5.5|medium");
-  };
+  }, []);
 
-  const loadDesktopIntegrations = async () => {
+  const loadDesktopIntegrations = useCallback(async () => {
     if (!window.electronAPI?.settings || !window.electronAPI?.tools) return;
     try {
       setToolsLoading(true);
@@ -210,9 +206,9 @@ export default function SettingsPage() {
     } catch { /* */ } finally {
       setToolsLoading(false);
     }
-  };
+  }, [applyDesktopSettings]);
 
-  const checkClaudeCode = async () => {
+  const checkClaudeCode = useCallback(async () => {
     setClaudeCodeSetup((s) => ({ ...s, checking: true }));
     try {
       const statuses = await window.electronAPI?.tools?.listStatus();
@@ -223,9 +219,9 @@ export default function SettingsPage() {
     } catch {
       setClaudeCodeSetup({ checking: false, installing: false, status: "error", detail: "Could not check status" });
     }
-  };
+  }, []);
 
-  const checkGithubCopilot = async () => {
+  const checkGithubCopilot = useCallback(async () => {
     setCopilotSetup((s) => ({ ...s, checking: true }));
     try {
       const statuses = await window.electronAPI?.tools?.listStatus();
@@ -241,7 +237,7 @@ export default function SettingsPage() {
     } catch {
       setCopilotSetup({ checking: false, installing: false, status: "error", detail: "Could not check status" });
     }
-  };
+  }, []);
 
   const handleSetupClaudeCode = async () => {
     setClaudeCodeSetup((s) => ({ ...s, installing: true, detail: "Installing Claude Code…" }));
@@ -283,7 +279,7 @@ export default function SettingsPage() {
     }
   };
 
-  const checkCodexCli = async () => {
+  const checkCodexCli = useCallback(async () => {
     setCodexSetup((s) => ({ ...s, checking: true }));
     try {
       const statuses = await window.electronAPI?.tools?.listStatus();
@@ -294,7 +290,7 @@ export default function SettingsPage() {
     } catch {
       setCodexSetup({ checking: false, installing: false, status: "error", detail: "Could not check status" });
     }
-  };
+  }, []);
 
   const handleSetupCodexCli = async () => {
     setCodexSetup((s) => ({ ...s, installing: true, detail: "Installing Codex CLI…" }));
@@ -399,7 +395,7 @@ export default function SettingsPage() {
 
     const stopListening = window.electronAPI?.settings?.onChanged((s: DesktopSettings) => applyDesktopSettings(s));
     return () => { stopListening?.(); };
-  }, []);
+  }, [applyDesktopSettings, checkClaudeCode, checkCodexCli, checkGithubCopilot, loadDesktopIntegrations, loadGithubAccounts]);
 
   return (
     <div className="text-text">
@@ -790,7 +786,7 @@ export default function SettingsPage() {
                     </div>
                     <p className={`mt-3 text-[12px] leading-relaxed theme-muted ${expandedTools.has(tool.id) ? "" : "line-clamp-3"}`}>{tool.detail}</p>
                     {tool.detail.length > 120 && (
-                      <button type="button" onClick={() => setExpandedTools((prev) => { const next = new Set(prev); next.has(tool.id) ? next.delete(tool.id) : next.add(tool.id); return next; })} className="mt-1 text-[10px] font-medium text-blue-500 hover:text-blue-600 dark:text-blue-400">
+                      <button type="button" onClick={() => setExpandedTools((prev) => { const next = new Set(prev); if (next.has(tool.id)) next.delete(tool.id); else next.add(tool.id); return next; })} className="mt-1 text-[10px] font-medium text-blue-500 hover:text-blue-600 dark:text-blue-400">
                         {expandedTools.has(tool.id) ? "Show less" : "Show more"}
                       </button>
                     )}

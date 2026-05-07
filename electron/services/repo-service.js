@@ -302,7 +302,7 @@ async function createRepoService({ settingsService } = {}) {
     let entries;
     try {
       entries = await fs.readdir(docsDir);
-    } catch (err) {
+    } catch {
       if (err && err.code === "ENOENT") return [];
       throw err;
     }
@@ -557,7 +557,7 @@ async function createRepoService({ settingsService } = {}) {
     // Set upstream if this is the first push
     try {
       await runGit(gitCommand, ["push", "-u", remote, branch], resolvedPath);
-    } catch (err) {
+    } catch {
       // Retry without -u in case upstream already exists
       try {
         await runGit(gitCommand, ["push", remote, branch], resolvedPath);

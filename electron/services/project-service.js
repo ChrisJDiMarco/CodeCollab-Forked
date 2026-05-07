@@ -1415,6 +1415,9 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     try {
       return await runProgram(cli, args, cwd, requestMeta, stdinData || null, streamJson || false, copilotJson || false, codexJson || false, manualApproval || false);
     } catch (err) {
+      if (isAgentCancelledError(err)) {
+        throw err;
+      }
       const errText = `${err.stderr || ""} ${err.stdout || ""} ${err.message || ""}`;
       if (provider === "codex" && selectedModel !== "default" && /not supported when using Codex with a ChatGPT account/i.test(errText)) {
         console.log("[runProviderCli] Codex ChatGPT model error — retrying without --model flag");
@@ -1681,6 +1684,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
   let activeRequestMeta = null;
   let activeRequestOutput = "";  // Accumulated stdout — persists across renderer navigation
   let activePendingApproval = null;  // Last approval request — survives renderer navigation
+  const cancelledChildProcesses = new WeakMap();
 
   function __setEventSender(sendEvent) {
     eventSender = sendEvent;
@@ -1688,6 +1692,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
   function cancelActiveRequest() {
     if (activeChildProcess && !activeChildProcess.killed) {
+      cancelledChildProcesses.set(activeChildProcess, "Stopped by user.");
       emitAgentEvent("project:agentCancelled", {
         ...activeRequestMeta,
         message: "Stopped by user.",
@@ -1699,6 +1704,11 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     activeChildProcess = null;
     activeRequestMeta = null;
     activeRequestOutput = "";
+    activePendingApproval = null;
+  }
+
+  function isAgentCancelledError(error) {
+    return Boolean(error?.cancelled || error?.code === "AGENT_CANCELLED");
   }
 
   /**
@@ -1730,12 +1740,14 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     // Kill any active process
     if (activeChildProcess) {
       try {
+        cancelledChildProcesses.set(activeChildProcess, "Force-reset by user.");
         activeChildProcess.kill("SIGKILL");
       } catch { /* ignore */ }
     }
     activeChildProcess = null;
     activeRequestMeta = null;
     activeRequestOutput = "";
+    activePendingApproval = null;
 
     // Clean up git state if repo path is provided
     if (repoPath) {
@@ -2147,7 +2159,25 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       });
       child.on("close", (code) => {
         clearInterval(keepaliveInterval);
-        activeChildProcess = null;
+        if (activeChildProcess === child) {
+          activeChildProcess = null;
+        }
+
+        const cancellationMessage = cancelledChildProcesses.get(child);
+        cancelledChildProcesses.delete(child);
+        if (cancellationMessage) {
+          activeRequestOutput = "";
+          activePendingApproval = null;
+          activeRequestMeta = null;
+          const err = new Error(cancellationMessage);
+          err.cancelled = true;
+          err.code = "AGENT_CANCELLED";
+          err.stdout = "";
+          err.stderr = stderr;
+          err.exitCode = code;
+          reject(err);
+          return;
+        }
 
         // Flush remaining jsonLineBuffer
         if ((streamJson || copilotJson || codexJson) && jsonLineBuffer.trim()) {
@@ -2234,7 +2264,22 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       });
       child.on("error", (err) => {
         clearInterval(keepaliveInterval);
-        activeChildProcess = null;
+        if (activeChildProcess === child) {
+          activeChildProcess = null;
+        }
+        const cancellationMessage = cancelledChildProcesses.get(child);
+        cancelledChildProcesses.delete(child);
+        if (cancellationMessage) {
+          activePendingApproval = null;
+          activeRequestMeta = null;
+          const cancelErr = new Error(cancellationMessage);
+          cancelErr.cancelled = true;
+          cancelErr.code = "AGENT_CANCELLED";
+          cancelErr.stdout = "";
+          cancelErr.stderr = "";
+          reject(cancelErr);
+          return;
+        }
         activePendingApproval = null;
         emitAgentEvent("project:agentError", {
           ...requestMeta,
@@ -3395,6 +3440,9 @@ function createProjectService({ app, settingsService, toolingService, p2pService
         promptText: prompt.trim(),
       });
     } catch (programError) {
+      if (isAgentCancelledError(programError)) {
+        throw programError;
+      }
       rawOutput = programError.stdout?.trim() || "";
       if (!rawOutput) throw programError;
     }
@@ -3652,6 +3700,9 @@ function createProjectService({ app, settingsService, toolingService, p2pService
         taskName: taskContext.task.title,
       });
     } catch (programError) {
+      if (isAgentCancelledError(programError)) {
+        throw programError;
+      }
       // If the CLI exited non-zero but produced stdout, recover the output
       // rather than losing the entire response
       rawOutput = programError.stdout?.trim() || "";
@@ -3998,7 +4049,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
         execFileSync("git", ["commit", "-m", `chore: restore checkpoint ${safeId}`], { ...gitOpts, windowsHide: true });
         execSync("git push", gitOpts);
         console.log("[checkpoint] Pushed restored state to git");
-      } catch (commitErr) {
+      } catch {
         // Nothing to commit (files were already at checkpoint state) — that's fine
         console.log("[checkpoint] Nothing new to commit after restore (files unchanged)");
       }
@@ -4536,7 +4587,10 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       agentOutput = (err && err.message) || "Agent failed";
       // Kill the child process if it's still running (timeout case)
       if (activeChildProcess && !activeChildProcess.killed) {
-        try { activeChildProcess.kill(); } catch { /* ignore */ }
+        try {
+          cancelledChildProcesses.set(activeChildProcess, "Agent analysis timed out.");
+          activeChildProcess.kill();
+        } catch { /* ignore */ }
         activeChildProcess = null;
         activeRequestMeta = null;
       }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Avatar } from "@/components";
 
 import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
@@ -44,8 +44,8 @@ type DirectThread = {
 export default function ProjectMessagesPage() {
   const { activeProject, canUseDesktopProject } = useActiveDesktopProject();
   const [view, setView] = useState<MessageView>("team");
-  const channels = (activeProject?.dashboard.channels ?? []) as ProjectChannel[];
-  const directMessages = (activeProject?.dashboard.directMessages ?? []) as DirectThread[];
+  const channels = useMemo(() => (activeProject?.dashboard.channels ?? []) as ProjectChannel[], [activeProject?.dashboard.channels]);
+  const directMessages = useMemo(() => (activeProject?.dashboard.directMessages ?? []) as DirectThread[], [activeProject?.dashboard.directMessages]);
   const [selectedChannelId, setSelectedChannelId] = useState("");
   const [selectedDmId, setSelectedDmId] = useState("");
 

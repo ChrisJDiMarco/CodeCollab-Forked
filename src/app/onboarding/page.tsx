@@ -14,6 +14,12 @@ interface ToolCheckState {
   detail: string;
 }
 
+interface ToolInstallResult {
+  success: boolean;
+  detail?: string;
+  log?: string[];
+}
+
 const defaultTool: ToolCheckState = { checking: false, installing: false, status: "unknown", detail: "" };
 
 /* ─── Helpers ─── */
@@ -24,6 +30,13 @@ function truncateDetail(detail: string): string {
   if (!detail) return "";
   const firstLine = detail.split("\n")[0].trim();
   return firstLine.length > 60 ? firstLine.slice(0, 57) + "…" : firstLine;
+}
+
+function installFailureLog(label: string, result: ToolInstallResult, fallback: string): string {
+  const lines = [result.detail || fallback, ...(result.log ?? []).slice(-8)]
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return [`${label} install failed.`, ...lines].join("\n");
 }
 
 /* ─── Step metadata ─── */
@@ -280,54 +293,102 @@ export default function OnboardingPage() {
     }
   }
 
-  async function installNodeJs() {
-    if (!canUseElectron()) return;
+  async function installNodeJs(): Promise<ToolInstallResult | null> {
+    if (!canUseElectron()) return null;
     setNode((s) => ({ ...s, installing: true }));
+    setInstallLog("Installing Node.js…");
     try {
       const result = await window.electronAPI!.tools.installNode();
-      setNode({ checking: false, installing: false, status: result.success ? "ready" : "missing", detail: truncateDetail(result.detail || (result.success ? "" : "Install failed")) });
-    } catch { setNode({ checking: false, installing: false, status: "error", detail: "Install crashed" }); }
+      setNode({ checking: false, installing: false, status: result.success ? "ready" : "error", detail: truncateDetail(result.detail || (result.success ? "" : "Install failed")) });
+      setInstallLog(result.success ? "" : installFailureLog("Node.js", result, "Install failed"));
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Install crashed";
+      const result = { success: false, detail: message, log: [] };
+      setNode({ checking: false, installing: false, status: "error", detail: "Install crashed" });
+      setInstallLog(`Node.js install failed: ${message}`);
+      return result;
+    }
   }
 
-  async function installGitScm() {
-    if (!canUseElectron()) return;
+  async function installGitScm(): Promise<ToolInstallResult | null> {
+    if (!canUseElectron()) return null;
     setGit((s) => ({ ...s, installing: true }));
+    setInstallLog("Installing Git…");
     try {
       const result = await window.electronAPI!.tools.installGit();
-      setGit({ checking: false, installing: false, status: result.success ? "ready" : "missing", detail: truncateDetail(result.detail || (result.success ? "" : "Install failed")) });
-    } catch { setGit({ checking: false, installing: false, status: "error", detail: "Install crashed" }); }
+      setGit({ checking: false, installing: false, status: result.success ? "ready" : "error", detail: truncateDetail(result.detail || (result.success ? "" : "Install failed")) });
+      setInstallLog(result.success ? "" : installFailureLog("Git", result, "Install failed"));
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Install crashed";
+      const result = { success: false, detail: message, log: [] };
+      setGit({ checking: false, installing: false, status: "error", detail: "Install crashed" });
+      setInstallLog(`Git install failed: ${message}`);
+      return result;
+    }
   }
 
-  async function installPython() {
-    if (!canUseElectron()) return;
+  async function installPython(): Promise<ToolInstallResult | null> {
+    if (!canUseElectron()) return null;
     setPython((s) => ({ ...s, installing: true }));
+    setInstallLog("Checking Python…");
     try {
       const result = await window.electronAPI!.tools.installPython();
-      setPython({ checking: false, installing: false, status: result.success ? "ready" : "missing", detail: truncateDetail(result.detail || (result.success ? "" : "Install failed")) });
-    } catch { setPython({ checking: false, installing: false, status: "error", detail: "Install crashed" }); }
+      setPython({ checking: false, installing: false, status: result.success ? "ready" : "error", detail: truncateDetail(result.detail || (result.success ? "" : "Install failed")) });
+      setInstallLog(result.success ? "" : installFailureLog("Python", result, "Install failed"));
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Install crashed";
+      const result = { success: false, detail: message, log: [] };
+      setPython({ checking: false, installing: false, status: "error", detail: "Install crashed" });
+      setInstallLog(`Python install failed: ${message}`);
+      return result;
+    }
   }
 
-  async function installGhCli() {
-    if (!canUseElectron()) return;
+  async function installGhCli(): Promise<ToolInstallResult | null> {
+    if (!canUseElectron()) return null;
     setGh((s) => ({ ...s, installing: true }));
+    setInstallLog("Installing GitHub CLI…");
     try {
       const result = await window.electronAPI!.tools.installGh();
-      setGh({ checking: false, installing: false, status: result.success ? "ready" : "missing", detail: truncateDetail(result.detail || (result.success ? "" : "Install failed")) });
-    } catch { setGh({ checking: false, installing: false, status: "error", detail: "Install crashed" }); }
+      setGh({ checking: false, installing: false, status: result.success ? "ready" : "error", detail: truncateDetail(result.detail || (result.success ? "" : "Install failed")) });
+      setInstallLog(result.success ? "" : installFailureLog("GitHub CLI", result, "Install failed"));
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Install crashed";
+      const result = { success: false, detail: message, log: [] };
+      setGh({ checking: false, installing: false, status: "error", detail: "Install crashed" });
+      setInstallLog(`GitHub CLI install failed: ${message}`);
+      return result;
+    }
   }
 
   async function installAllMissing() {
     if (!canUseElectron()) return;
     setInstallingAll(true);
     setInstallLog("");
-    const tasks: Promise<void>[] = [];
-    if (git.status !== "ready" && !git.installing) tasks.push(installGitScm());
-    if (node.status !== "ready" && !node.installing) tasks.push(installNodeJs());
-    if (python.status !== "ready" && !python.installing) tasks.push(installPython());
-    if (gh.status !== "ready" && !gh.installing) tasks.push(installGhCli());
-    if (tasks.length > 0) await Promise.allSettled(tasks);
-    setInstallingAll(false);
-    await checkAllTools();
+    const tasks: Array<{ label: string; run: () => Promise<ToolInstallResult | null> }> = [];
+    if (git.status !== "ready" && !git.installing) tasks.push({ label: "Git", run: installGitScm });
+    if (node.status !== "ready" && !node.installing) tasks.push({ label: "Node.js", run: installNodeJs });
+    if (python.status !== "ready" && !python.installing) tasks.push({ label: "Python", run: installPython });
+    if (gh.status !== "ready" && !gh.installing) tasks.push({ label: "GitHub CLI", run: installGhCli });
+
+    const failures: string[] = [];
+    try {
+      for (const task of tasks) {
+        const result = await task.run();
+        if (result && !result.success) {
+          failures.push(installFailureLog(task.label, result, "Install failed"));
+        }
+      }
+    } finally {
+      setInstallingAll(false);
+      await checkAllTools();
+    }
+
+    setInstallLog(failures.join("\n\n"));
   }
 
   /* ── Claude auth ── */
@@ -355,7 +416,7 @@ export default function OnboardingPage() {
   useEffect(() => {
     if (step !== "provider" || !canUseElectron()) return;
     if (claude.status === "ready" && selectedProviders.has("claude")) checkClaudeAuth();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [step, claude.status, selectedProviders]);
 
   /* ── Codex auth ── */
@@ -383,7 +444,7 @@ export default function OnboardingPage() {
   useEffect(() => {
     if (step !== "provider" || !canUseElectron()) return;
     if (codex.status === "ready" && selectedProviders.has("codex")) checkCodexAuth();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [step, codex.status, selectedProviders]);
 
   /* ── Copilot CLI auth ── */
@@ -423,14 +484,14 @@ export default function OnboardingPage() {
   useEffect(() => {
     if (step !== "provider" || !canUseElectron()) return;
     if (copilot.status === "ready" && selectedProviders.has("copilot")) checkCopilotAuth();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [step, copilot.status, selectedProviders]);
 
   /* ── GitHub auth ── */
   useEffect(() => {
     if (step !== "github" || !canUseElectron()) return;
     checkGithubAuth();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [step]);
 
   async function checkGithubAuth() {
@@ -495,6 +556,11 @@ export default function OnboardingPage() {
   const canGoBack = stepIndex > 0 && step !== "done";
   const goBack = () => { if (canGoBack) setStep(STEPS[stepIndex - 1]); };
   const goNext = (target?: Step) => { setStep(target || STEPS[Math.min(stepIndex + 1, STEPS.length - 1)]); };
+  const requiredTools = [git, node, python, gh];
+  const requiredToolsReady = requiredTools.every((tool) => tool.status === "ready");
+  const requiredToolsBusy = installingAll || requiredTools.some((tool) => tool.checking || tool.installing);
+  const requiredToolsChecked = requiredTools.some((tool) => tool.status !== "unknown");
+  const requiredToolsNeedAttention = requiredTools.filter((tool) => tool.status === "missing" || tool.status === "error" || tool.status === "unknown").length;
 
   /* ═══════════════════════════════════════════════════════════════════
      RENDER — Clean centered single-step layout
@@ -594,7 +660,25 @@ export default function OnboardingPage() {
                 return null;
               })()}
 
-              <NavButtons onBack={goBack} onNext={() => goNext()} nextLabel="Continue" backLabel="Back" />
+              {installLog && (
+                <div className="mt-4 rounded-xl border border-edge bg-stage-up px-4 py-3">
+                  <pre className="whitespace-pre-wrap break-words text-xs text-text-mid">{installLog}</pre>
+                </div>
+              )}
+
+              {requiredToolsChecked && !requiredToolsReady && !requiredToolsBusy && (
+                <p className="mt-4 text-center text-xs font-medium text-text-dim">
+                  {requiredToolsNeedAttention === 1 ? "One required tool still needs attention." : `${requiredToolsNeedAttention} required tools still need attention.`}
+                </p>
+              )}
+
+              <NavButtons
+                onBack={goBack}
+                onNext={() => goNext()}
+                nextLabel="Continue"
+                backLabel="Back"
+                nextDisabled={!requiredToolsReady || requiredToolsBusy}
+              />
             </FadeIn>
           )}
 
@@ -1179,19 +1263,6 @@ function ProviderStatusRow({
       ) : (
         <GreenCheck small />
       )}
-    </div>
-  );
-}
-
-/** Auth row */
-function AuthRowLight({ label, status, error, onSignIn }: { label: string; status: string; error: string | null; onSignIn: () => void }) {
-  if (status === "checking") return <div className="flex items-center gap-2 px-4 py-2 text-sm"><Spinner className="text-text-ghost" size={14} /><span className="text-text-dim">Checking {label}…</span></div>;
-  if (status === "authenticated") return <div className="flex items-center gap-2 px-4 py-2 text-sm text-emerald-600"><GreenCheck small /><span className="font-medium">Signed in to {label}</span></div>;
-  if (status === "authenticating") return <div className="flex items-center gap-2 px-4 py-2 text-sm"><Spinner className="text-violet" size={14} /><span className="text-violet">Signing in…</span><span className="text-xs text-text-dim">Complete in browser</span></div>;
-  return (
-    <div className="px-4 py-1.5 space-y-1">
-      <button onClick={onSignIn} className="rounded-full bg-violet/10 px-4 py-1.5 text-xs font-semibold text-violet transition hover:bg-violet/20">Sign in to {label}</button>
-      {error && <p className="text-xs text-coral">{error}</p>}
     </div>
   );
 }

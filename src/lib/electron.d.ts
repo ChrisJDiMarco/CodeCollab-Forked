@@ -499,7 +499,7 @@ export interface ToolStatus {
 
 export interface DesktopActivityEvent {
   id: string;
-  type: "build" | "review" | "comment" | "status" | "deploy" | "join";
+  type: "build" | "review" | "comment" | "status" | "deploy" | "join" | "sync";
   title: string;
   description: string;
   actor: string;
@@ -856,16 +856,17 @@ export interface ElectronAPI {
     onCreated: (callback: (event: DesktopActivityEvent) => void) => () => void;
   };
   fileWatcher: {
-    start: (payload: { repoPath: string }) => Promise<{ watching: boolean; repoPath?: string; error?: string }>;
+    start: (payload: { repoPath: string; projectId?: string }) => Promise<{ watching: boolean; repoPath?: string; projectId?: string | null; error?: string }>;
     stop: () => Promise<{ watching: boolean }>;
-    status: () => Promise<{ watching: boolean; repoPath: string | null; paused: boolean; syncing: boolean }>;
+    status: () => Promise<{ watching: boolean; repoPath: string | null; projectId: string | null; paused: boolean; syncing: boolean }>;
     triggerSync: () => Promise<{ triggered?: boolean; error?: string }>;
-    pushToMain: (payload: { repoPath: string }) => Promise<{ success: boolean; message: string }>;
+    pushToMain: (payload: { repoPath: string; projectId?: string }) => Promise<{ success: boolean; message: string }>;
     onChanged: (callback: (data: { eventType: string; filePath: string }) => void) => () => void;
-    onStatus: (callback: (data: { watching: boolean; repoPath: string | null }) => void) => () => void;
-    onSyncStart: (callback: (data: { repoPath: string }) => void) => () => void;
-    onSyncComplete: (callback: (data: { repoPath: string; success: boolean; commitMessage?: string; error?: string }) => void) => () => void;
-    onPullComplete: (callback: (data: { repoPath: string; success: boolean; error?: string }) => void) => () => void;
+    onStatus: (callback: (data: { watching: boolean; repoPath: string | null; projectId?: string | null }) => void) => () => void;
+    onSyncStart: (callback: (data: { projectId?: string | null; repoPath: string; branch?: string }) => void) => () => void;
+    onSyncComplete: (callback: (data: { projectId?: string | null; repoPath: string; branch?: string; success: boolean; commitMessage?: string; skipped?: boolean; reason?: string; error?: string }) => void) => () => void;
+    onPullStart: (callback: (data: { projectId?: string | null; repoPath: string; branch?: string }) => void) => () => void;
+    onPullComplete: (callback: (data: { projectId?: string | null; repoPath: string; branch?: string; success: boolean; message?: string; error?: string }) => void) => () => void;
     onPeerSync: (callback: (data: { peerName: string; branch: string; pullResult: { success: boolean; message: string } }) => void) => () => void;
   };
   openDirectory: () => Promise<string | null>;

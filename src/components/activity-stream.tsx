@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { RunInTerminalButton } from "./run-in-terminal-button";
 
 /* ═══════════════════════════════════════════════════════════════
@@ -456,7 +456,7 @@ function renderInline(text: string): React.ReactNode[] {
 // Renders the body content of a single activity event with
 // markdown-like formatting (code blocks, lists, paragraphs).
 
-function EventBody({ body, kind }: { body: string; kind: ActivityKind }) {
+function EventBody({ body }: { body: string; kind: ActivityKind }) {
   const lines = body.split("\n");
   const elements: React.ReactNode[] = [];
   let idx = 0;

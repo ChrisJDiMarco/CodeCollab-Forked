@@ -1075,7 +1075,7 @@ export const commits: Commit[] = [
 
 export interface ActivityEvent {
   id: string;
-  type: "build" | "review" | "comment" | "status" | "deploy" | "join";
+  type: "build" | "review" | "comment" | "status" | "deploy" | "join" | "sync";
   title: string;
   description: string;
   actor: string;

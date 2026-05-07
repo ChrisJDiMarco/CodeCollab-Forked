@@ -2,15 +2,12 @@
 
 import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { Avatar } from "@/components";
-import { friends as seedFriends, ideas, type Friend, type Idea } from "@/lib/mock-data";
-import { nowTimestamp } from "@/lib/format-time";
+import { useRouter } from "next/navigation";
+import { ideas, type Friend, type Idea } from "@/lib/mock-data";
 
 /* ─── visual constants ─── */
 
 type ProjectStage = "Planning" | "Building" | "Review" | "Live";
-const stages: ProjectStage[] = ["Planning", "Building", "Review", "Live"];
 
 const stageColor: Record<ProjectStage, string> = {
   Planning: "var(--text-ghost)",
@@ -42,7 +39,6 @@ interface ManagedProject {
   taskCounts?: { planned: number; building: number; review: number; done: number; total: number };
 }
 
-type HomeTab = "projects" | "friends";
 type ProjectDeleteMode = "codebuddy-only" | "local-only" | "github-only" | "local-and-github";
 
 interface FriendMessage {
@@ -212,12 +208,9 @@ const initialCodingFriends: CodingFriend[] = [
 /* ─── page ─── */
 
 function HomePageContent() {
-  const searchParams = useSearchParams();
   const router = useRouter();
-  const activeTab: HomeTab = searchParams.get("tab") === "friends" ? "friends" : "projects";
   const [projects, setProjects] = useState(initialProjects);
-  const [codingFriends, setCodingFriends] = useState(initialCodingFriends);
-  const [selectedFriendId, setSelectedFriendId] = useState(initialCodingFriends[0]?.id ?? "");
+  const [, setCodingFriends] = useState(initialCodingFriends);
   const [showCreator, setShowCreator] = useState(false);
   const [showFriendCreator, setShowFriendCreator] = useState(false);
   const [draftName, setDraftName] = useState("");
@@ -229,7 +222,6 @@ function HomePageContent() {
   const [draftImportPath, setDraftImportPath] = useState("");
   const [draftFriendName, setDraftFriendName] = useState("");
   const [draftFriendFocus, setDraftFriendFocus] = useState("");
-  const [friendMessage, setFriendMessage] = useState("");
   const [projectLoading, setProjectLoading] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
@@ -250,8 +242,6 @@ function HomePageContent() {
   const [joinInviteProjectName, setJoinInviteProjectName] = useState("");
   const [joinInviteRemoteUrl, setJoinInviteRemoteUrl] = useState("");
   const [joinInviteFolder, setJoinInviteFolder] = useState("");
-
-  const selectedFriend = codingFriends.find((friend) => friend.id === selectedFriendId) ?? codingFriends[0] ?? null;
 
   useEffect(() => {
     async function loadDesktopProjects() {
@@ -584,36 +574,10 @@ function HomePageContent() {
     };
 
     setCodingFriends((current) => [nextFriend, ...current]);
-    setSelectedFriendId(nextFriend.id);
     setDraftFriendName("");
     setDraftFriendFocus("");
     setShowFriendCreator(false);
     router.push("/home?tab=friends");
-  };
-
-  const handleSendFriendMessage = () => {
-    if (!selectedFriend || !friendMessage.trim()) {
-      return;
-    }
-
-    const nextMessage: FriendMessage = {
-      id: `message-${Date.now()}`,
-      from: "You",
-      text: friendMessage.trim(),
-      time: nowTimestamp(),
-      isMine: true,
-    };
-
-    setCodingFriends((current) => current.map((friend) => (
-      friend.id === selectedFriend.id
-        ? {
-          ...friend,
-          updatedAgo: "Just now",
-          messages: [...friend.messages, nextMessage],
-        }
-        : friend
-    )));
-    setFriendMessage("");
   };
 
   return (

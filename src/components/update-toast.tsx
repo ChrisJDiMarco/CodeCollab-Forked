@@ -43,7 +43,7 @@ export default function UpdateToast() {
             Update ready{version ? ` — v${version}` : ""}
           </div>
           <div className="mt-1 text-xs text-zinc-400">
-            A new version of CodeCollab has been downloaded. Restart now to apply, or it'll install automatically next time you quit the app.
+            A new version of CodeCollab has been downloaded. Restart now to apply, or it&apos;ll install automatically next time you quit the app.
           </div>
           <div className="mt-3 flex gap-2">
             <button

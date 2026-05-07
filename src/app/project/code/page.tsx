@@ -10,7 +10,6 @@ import RunSummaryCard from "@/components/run-summary-card";
 import PromptCard from "@/components/prompt-card";
 import { nowTimestamp } from "@/lib/format-time";
 import { useStreamEvents } from "@/hooks/use-stream-events";
-import { RunInTerminalButton } from "@/components/run-in-terminal-button";
 import { buildPickerRows, effortLabel } from "@/lib/model-picker";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
@@ -22,14 +21,6 @@ function CodeBracketIcon({ className }: { className?: string }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" />
-    </svg>
-  );
-}
-
-function PaperClipIcon({ className }: { className?: string }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 20" strokeWidth={1.5} stroke="currentColor" className={className}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15.621 4.379a3 3 0 00-4.242 0l-7.07 7.07a5 5 0 007.07 7.07l4.243-4.242" />
     </svg>
   );
 }
@@ -107,44 +98,6 @@ interface FileTreeEntry {
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
-function renderMessageText(text: string) {
-  const parts = text.split(/(```[\s\S]*?```)/g);
-  return parts.map((part, i) => {
-    if (part.startsWith("```") && part.endsWith("```")) {
-      const inner = part.slice(3, -3);
-      const firstNewline = inner.indexOf("\n");
-      const lang = firstNewline > 0 ? inner.slice(0, firstNewline).trim() : "";
-      const code = firstNewline > 0 ? inner.slice(firstNewline + 1) : inner;
-      return (
-        <div key={i} className="my-3 overflow-hidden rounded-xl bg-[#0d1117] ring-1 ring-white/[0.06]">
-          {lang ? (
-            <div className="flex items-center justify-between border-b border-white/[0.06] bg-[#161b22] px-4 py-2">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-white/40">{lang}</span>
-              <div className="flex items-center gap-2">
-                <RunInTerminalButton code={code} lang={lang} variant="muted" />
-                <button type="button" onClick={() => { try { navigator.clipboard.writeText(code); } catch { /* */ } }} className="text-[10px] font-medium text-white/30 transition hover:text-white/60">Copy</button>
-              </div>
-            </div>
-          ) : null}
-          <pre className="overflow-x-auto px-4 py-3 font-mono text-[12px] leading-[1.7] text-green-300/90 selection:bg-green-600/30"><code>{code}</code></pre>
-        </div>
-      );
-    }
-    const inlined = part.split(/(`[^`]+`)/g);
-    return (
-      <span key={i}>
-        {inlined.map((seg, j) =>
-          seg.startsWith("`") && seg.endsWith("`") ? (
-            <code key={j} className="rounded-md bg-black/[0.06] px-1.5 py-0.5 font-mono text-[12px] dark:bg-white/[0.08]">{seg.slice(1, -1)}</code>
-          ) : (
-            <span key={j} className="whitespace-pre-wrap">{seg}</span>
-          )
-        )}
-      </span>
-    );
-  });
-}
-
 function getFileExtensionColor(name: string): string {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
@@ -208,7 +161,7 @@ export default function SoloChatPage() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
   const [otherAgentActive, setOtherAgentActive] = useState<{ scope?: string; taskName?: string } | null>(null);
-  const { events: liveEvents, processChunk: liveProcessChunk, startStreaming: liveStartStreaming, finalize: liveFinalize, reset: liveResetEvents, getRawText: liveGetRawText, setScrollCallback: liveSetScrollCallback } = useStreamEvents();
+  const { events: liveEvents, processChunk: liveProcessChunk, startStreaming: liveStartStreaming, finalize: liveFinalize, reset: liveResetEvents, getRawText: liveGetRawText } = useStreamEvents();
   const [selectedModel, setSelectedModel] = useState("auto");
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [reasoningView, setReasoningView] = useState<{ baseId: string; baseLabel: string } | null>(null);
@@ -310,7 +263,7 @@ export default function SoloChatPage() {
     if (featureFlags?.githubCopilotCli) entries.push(...catalogSources.copilot);
     if (featureFlags?.codexCli) entries.push(...catalogSources.codex);
     return entries.length > 0 ? entries : catalogSources.copilot;
-  }, [featureFlags, catalogSources, DEFAULT_copilotModels]);
+  }, [featureFlags, catalogSources]);
 
   const selectedModelMeta = useMemo(
     () => modelCatalog.find((m) => m.id === selectedModel) ?? modelCatalog[0],
@@ -414,7 +367,7 @@ export default function SoloChatPage() {
       }
     });
     return () => { cancelled = true; stopListening?.(); };
-  }, []);
+  }, [DEFAULT_claudeModels, DEFAULT_codexModels, DEFAULT_copilotModels]);
 
   /* --- auto-scroll chat --- */
   useEffect(() => {
@@ -499,7 +452,7 @@ export default function SoloChatPage() {
     // Restore accumulated peer streams from main process (for reconnect after navigation)
     (async () => {
       try {
-        const streams = await (window as /* eslint-disable-next-line @typescript-eslint/no-explicit-any */ any).electronAPI?.p2p?.getActivePeerStreams?.({ projectId: activeProject?.id });
+        const streams = await window.electronAPI?.p2p?.getActivePeerStreams?.({ projectId: activeProject?.id });
         if (streams && Object.keys(streams).length > 0) {
           setPeerStreams((prev: Record<string, { peerName: string; conversationId: string; scope: string; tokens: string; updatedAt: number; taskId?: string | null; taskName?: string | null; sessionId?: string | null; sessionTitle?: string | null }>) => {
             const merged = { ...prev };
@@ -519,7 +472,7 @@ export default function SoloChatPage() {
       for (const t of Object.values(peerStreamTimeoutsRef.current)) clearTimeout(t);
       peerStreamTimeoutsRef.current = {};
     };
-  }, []);
+  }, [activeProject?.id, liveProcessChunk, liveStartStreaming]);
 
   /* --- Reconnect to active solo-chat on mount, or detect other-scope agent --- */
   useEffect(() => {
@@ -542,7 +495,7 @@ export default function SoloChatPage() {
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [liveProcessChunk, liveStartStreaming]);
 
   /* --- Listen for agent completion to clear otherAgentActive blocking --- */
   useEffect(() => {
@@ -617,12 +570,24 @@ export default function SoloChatPage() {
     return () => { stopStarted(); stopOutput(); stopCompleted(); stopError(); };
   }, []);
 
+  const loadFileTree = useCallback(async (dirPath: string) => {
+    if (!window.electronAPI?.repo?.listDirectory) return;
+    try {
+      const entries = await window.electronAPI.repo.listDirectory(dirPath);
+      const sorted = [...entries].sort((a, b) => {
+        if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      setFileTree(sorted);
+    } catch { /* */ }
+  }, []);
+
   /* --- load file tree when panel opens --- */
   useEffect(() => {
     if (rightPanel === "files" && activeProject?.repoPath && fileTree.length === 0) {
       void loadFileTree(activeProject.repoPath);
     }
-  }, [rightPanel, activeProject?.repoPath]);
+  }, [rightPanel, activeProject?.repoPath, fileTree.length, loadFileTree]);
 
   /* --- drag resize handler --- */
   useEffect(() => {
@@ -646,18 +611,6 @@ export default function SoloChatPage() {
   }, []);
 
   /* --- handlers --- */
-  const loadFileTree = async (dirPath: string) => {
-    if (!window.electronAPI?.repo?.listDirectory) return;
-    try {
-      const entries = await window.electronAPI.repo.listDirectory(dirPath);
-      const sorted = [...entries].sort((a, b) => {
-        if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-      setFileTree(sorted);
-    } catch { /* */ }
-  };
-
   const handleNavigateDir = async (entry: FileTreeEntry) => {
     if (entry.type === "directory") {
       setFileTreePath((prev) => [...prev, entry.name]);
@@ -906,7 +859,7 @@ export default function SoloChatPage() {
         sessionId: activeSessionId,
       });
       showToast("\u2713 Conversation compacted");
-    } catch (err) {
+    } catch {
       showToast("Failed to compact conversation");
     } finally {
       setIsCompacting(false);

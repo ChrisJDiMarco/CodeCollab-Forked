@@ -274,6 +274,7 @@ let staticServer = null;
 let staticServerUrl = null;
 
 const isDev = !app.isPackaged;
+const devServerUrl = process.env.CODECOLLAB_DEV_URL || "http://localhost:3000";
 
 // Prevent Chromium from caching old JS bundles after updates
 if (!isDev) {
@@ -293,7 +294,7 @@ const activityService = createActivityService();
 const sharedStateService = createSharedStateService();
 const p2pService = createP2PService({ sharedStateService, sendEvent: () => undefined });
 const gitQueueService = createGitQueueService();
-const fileWatcherService = createFileWatcherService({ repoService: null, processService, p2pService, gitQueueService, sendEvent: () => undefined });
+const fileWatcherService = createFileWatcherService({ repoService: null, processService, p2pService, gitQueueService, activityService, sendEvent: () => undefined });
 const projectService = createProjectService({ app, settingsService, toolingService, p2pService, sharedStateService });
 let repoService = null;
 
@@ -335,7 +336,7 @@ function resolveExportedFile(rootDir, requestPath) {
 
 async function ensureStaticServer() {
   if (isDev) {
-    return "http://localhost:3000";
+    return devServerUrl;
   }
 
   if (staticServerUrl) {
@@ -499,7 +500,7 @@ async function createWindow() {
 
   // In dev, load the Next.js dev server; in prod, serve the exported app over localhost.
   if (isDev) {
-    mainWindow.loadURL("http://localhost:3000");
+    mainWindow.loadURL(devServerUrl);
     mainWindow.webContents.openDevTools();
   } else {
     // Clear Chromium's HTTP/code cache so updated JS bundles always load

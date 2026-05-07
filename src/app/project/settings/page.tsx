@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
 
@@ -28,7 +28,7 @@ export default function SettingsPage() {
   const showSetupToast = (msg: string) => { setSetupToast(msg); setTimeout(() => setSetupToast(null), 4000); };
 
   /* Load collaborators from GitHub */
-  const loadCollaborators = async () => {
+  const loadCollaborators = useCallback(async () => {
     if (!activeProject?.repoPath) return;
     setCollabLoading(true);
     try {
@@ -39,7 +39,7 @@ export default function SettingsPage() {
     } finally {
       setCollabLoading(false);
     }
-  };
+  }, [activeProject?.repoPath]);
 
   /* Change GitHub repo visibility */
   const handleVisibilityChange = async (vis: "private" | "public") => {
@@ -61,7 +61,7 @@ export default function SettingsPage() {
   };
 
   /* Shared workspace helpers */
-  const checkSharedState = async () => {
+  const checkSharedState = useCallback(async () => {
     if (!activeProject?.repoPath) return;
     try {
       const initialized = await window.electronAPI?.sharedState?.isInitialized(activeProject.repoPath);
@@ -77,7 +77,7 @@ export default function SettingsPage() {
     } catch {
       setSharedInitialized(false);
     }
-  };
+  }, [activeProject?.repoPath]);
 
   const handleInitSharedWorkspace = async () => {
     if (!activeProject?.repoPath) { showSetupToast("Open a project first"); return; }
@@ -147,7 +147,7 @@ export default function SettingsPage() {
         }
       } catch { /* */ }
     })();
-  }, []);
+  }, [checkSharedState, loadCollaborators]);
 
   const isOwner = currentGithubUser
     ? collaborators.some((c) => c.login.toLowerCase() === currentGithubUser.toLowerCase() && c.role === "Owner")

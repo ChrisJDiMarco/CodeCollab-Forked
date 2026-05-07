@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useMemo } from "react";
-import { buildRunSummary, type RunSummary, type RunSummarySection, type RunStatus, type ResponseMode, type ActionStep } from "@/lib/run-summary";
+import { buildRunSummary, type RunSummary, type RunSummarySection, type RunStatus, type ActionStep } from "@/lib/run-summary";
 import { RunInTerminalButton } from "./run-in-terminal-button";
 
 /* ═══════════════════════════════════════════════════════════════
@@ -66,26 +66,6 @@ const STATUS_CONFIG: Record<RunStatus, { label: string; color: string; bg: strin
       </svg>
     ),
   },
-};
-
-// Mode-specific status icons for conversational/analysis modes
-const MODE_ICONS: Partial<Record<ResponseMode, React.ReactNode>> = {
-  conversational: (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-      <path fillRule="evenodd" d="M1 8.74c0 .983.713 1.825 1.69 1.943.764.092 1.534.164 2.31.216v2.351a.75.75 0 0 0 1.28.53l2.51-2.51c.182-.181.427-.284.684-.288a44.78 44.78 0 0 0 3.837-.153A1.98 1.98 0 0 0 15 8.74V4.26c0-.983-.713-1.825-1.69-1.943A44.9 44.9 0 0 0 8 2a44.9 44.9 0 0 0-5.31.317A1.98 1.98 0 0 0 1 4.26v4.482Z" clipRule="evenodd" />
-    </svg>
-  ),
-  analysis: (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-      <path fillRule="evenodd" d="M9.965 11.026a5 5 0 1 1 1.06-1.06l2.755 2.754a.75.75 0 1 1-1.06 1.06l-2.755-2.754ZM10.5 7a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0Z" clipRule="evenodd" />
-    </svg>
-  ),
-  instructional: (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-      <path d="M8 1a.75.75 0 0 1 .75.75V6h4.5a.75.75 0 0 1 0 1.5h-4.5v4.25a.75.75 0 0 1-1.5 0V7.5h-4.5a.75.75 0 0 1 0-1.5h4.5V1.75A.75.75 0 0 1 8 1Z" />
-      <path d="M2.75 12.5a.75.75 0 0 0 0 1.5h10.5a.75.75 0 0 0 0-1.5H2.75Z" />
-    </svg>
-  ),
 };
 
 // ─── Section icon ─────────────────────────────────────────────

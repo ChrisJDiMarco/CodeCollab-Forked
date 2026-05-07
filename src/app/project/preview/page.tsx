@@ -36,6 +36,7 @@ function GlobeIcon({ className }: { className?: string }) {
 /* ------------------------------------------------------------------ */
 export default function PreviewPage() {
   const { activeProject } = useActiveDesktopProject();
+  const activeRepoPath = activeProject?.repoPath;
 
   /* --- preview state --- */
   const [pendingPreviewLaunch, setPendingPreviewLaunch] = useState(false);
@@ -66,11 +67,11 @@ export default function PreviewPage() {
 
   /* --- process event listeners --- */
   useEffect(() => {
-    if (!window.electronAPI?.process || !activeProject) return;
+    if (!window.electronAPI?.process || !activeRepoPath) return;
 
     const isPreviewCommand = (command?: string, cwd?: string) => {
-      const cwdMatch = typeof cwd === "string" && typeof activeProject.repoPath === "string"
-        && cwd.toLowerCase().replace(/[\\/]+$/g, "") === activeProject.repoPath.toLowerCase().replace(/[\\/]+$/g, "");
+      const cwdMatch = typeof cwd === "string"
+        && cwd.toLowerCase().replace(/[\\/]+$/g, "") === activeRepoPath.toLowerCase().replace(/[\\/]+$/g, "");
       return Boolean(cwdMatch && command && /npm|node|python|flask|cargo|vite|next|concurrently|react-scripts|webpack|parcel|rollup|esbuild|turbo|pnpm|yarn|bun|pip|uvicorn|gunicorn|rails|bundle|go\s+run|dotnet|make|docker/i.test(command));
     };
 
@@ -242,7 +243,7 @@ export default function PreviewPage() {
       stopCancelled();
       stopTimeout();
     };
-  }, [activeProject?.repoPath]);
+  }, [activeRepoPath]);
 
   /* --- auto-scroll log output --- */
   useEffect(() => {

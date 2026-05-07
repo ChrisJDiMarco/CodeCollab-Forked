@@ -1335,7 +1335,7 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
     // Use atomicUpdate to prevent concurrent read-modify-write races
     let planChanged = false;
     let project = null;
-    const updatedSettings = await settingsService.atomicUpdate((settings) => {
+    await settingsService.atomicUpdate((settings) => {
       const projectIndex = settings.projects?.findIndex(p => p.id === projectId);
       if (projectIndex < 0) return undefined; // no-op
 
@@ -2398,7 +2398,8 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
 
   safeHandle("fileWatcher:start", async (_event, payload) => {
     if (!fileWatcherService) return { watching: false, error: "File watcher not available" };
-    return fileWatcherService.startWatching(payload.repoPath);
+    if (!payload?.repoPath) return { watching: false, error: "repoPath is required" };
+    return fileWatcherService.startWatching(payload.repoPath, payload.projectId);
   });
 
   safeHandle("fileWatcher:stop", async () => {
@@ -2419,7 +2420,8 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
 
   safeHandle("fileWatcher:pushToMain", async (_event, payload) => {
     if (!fileWatcherService) return { success: false, message: "File watcher not available" };
-    const result = await fileWatcherService.pushToMain(payload.repoPath);
+    if (!payload?.repoPath) return { success: false, message: "repoPath is required" };
+    const result = await fileWatcherService.pushToMain(payload.repoPath, payload.projectId);
     if (result.success) {
       logActivity({
         type: "deploy",
@@ -2437,6 +2439,8 @@ function registerIpcHandlers({ app, mainWindow, processService, repoService, set
   processService.__setEventSender(sendEvent);
   activityService.__setEventSender(sendEvent);
   p2pService.__setEventSender(sendEvent);
+  fileWatcherService?.__setEventSender?.(sendEvent);
+  fileWatcherService?.__setActivityService?.(activityService);
 
   processService.__setActivityLogger?.((kind, payload) => {
     if (kind === "started") {
