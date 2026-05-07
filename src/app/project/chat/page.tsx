@@ -17,13 +17,16 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ChatBubble } from "@/components";
 import ActivityStream from "@/components/activity-stream-v2";
 import RunSummaryCard from "@/components/run-summary-card";
 import PromptCard from "@/components/prompt-card";
 import FormattedLiveOutput from "@/components/formatted-live-output";
-import { buildArtifacts, conversation, ideas, projectBuildPlans, taskConversationThreads, type BuildArtifact, type Message } from "@/lib/mock-data";
+import { QuestionCard } from "@/components/question-card";
+import type { AgentQuestion } from "@/lib/electron";
+import { buildArtifacts, conversation, ideas, projectBuildPlans, taskConversationThreads, type BuildArtifact, type ChatMode, type Message } from "@/lib/mock-data";
 
 import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
 import { useStreamEvents } from "@/hooks/use-stream-events";
@@ -166,6 +169,8 @@ type RealProjectConversationMessage = {
   checkpointId?: string | null;
   fromPeer?: boolean;
   peerName?: string;
+  planId?: string;
+  planTitle?: string;
 };
 
 function inferTaskArtifactId(taskTitle = "", subprojectTitle = "", responseText = "") {
@@ -2152,6 +2157,13 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
     try { sessionStorage.setItem("codebuddy:chat:draft", v); } catch { /* quota */ }
   }, []);
   const [displayName, setDisplayName] = useState("");
+
+  // Chat mode toggle: PM chat is locked to "plan"; task chats default to "agent".
+  const isPMChat = !taskContext;
+  const [chatMode, setChatMode] = useState<ChatMode>(isPMChat ? "plan" : "agent");
+  useEffect(() => {
+    if (isPMChat) setChatMode("plan");
+  }, [isPMChat]);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags>({});
   const [catalogSources, setCatalogSources] = useState<CatalogSources>({
     copilot: DEFAULT_copilotModels,
@@ -2172,6 +2184,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const isGeneratingViaAwaitRef = useRef(false); // true when handleGeneratePlan is actively awaiting
   const [pendingApproval, setPendingApproval] = useState<{ toolName: string; toolInput: Record<string, unknown> } | null>(null);
+  const [pendingQuestion, setPendingQuestion] = useState<AgentQuestion | null>(null);
   const [composerApprovalMode, setComposerApprovalMode] = useState<"default" | "auto" | "manual">("default");
   const [settingsApprovalMode, setSettingsApprovalMode] = useState<"auto" | "manual">("auto");
   const [generationError, setGenerationError] = useState<string | null>(null);
@@ -2260,9 +2273,9 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
   const peerStreamTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   // ── Track which task/scope the local agent is generating for ──
-  const [generatingForMeta, setGeneratingForMeta] = useState<{ taskId?: string; taskName?: string; scope?: string } | null>(null);
+  const [generatingForMeta, setGeneratingForMeta] = useState<{ taskId?: string; taskName?: string; scope?: string; sessionId?: string } | null>(null);
   // ── Track active agent on a DIFFERENT task/scope (for banner display) ──
-  const [otherAgentMeta, setOtherAgentMeta] = useState<{ taskId?: string; taskName?: string; scope?: string } | null>(null);
+  const [otherAgentMeta, setOtherAgentMeta] = useState<{ taskId?: string; taskName?: string; scope?: string; sessionId?: string } | null>(null);
 
   const conversation = taskContext ? (activeTaskThread?.messages ?? []) : activeProject.dashboard.conversation;
   const hasPlan = Boolean(activeProject.dashboard.plan);
@@ -2494,8 +2507,18 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
       return;
     }
 
-    const matchesCurrentRequest = (event: { projectId?: string; taskId?: string; threadId?: string }) => {
+    const matchesCurrentRequest = (event: { projectId?: string; taskId?: string; threadId?: string; scope?: string }) => {
       if (event.projectId && event.projectId !== activeProject.id) {
+        return false;
+      }
+
+      // Reject solo-chat events — those belong to the freestyle/code page.
+      if (event.scope === "solo-chat" || event.scope === "solo") {
+        return false;
+      }
+
+      // PM-scoped events should only fire when we're not viewing a task thread.
+      if ((event.scope === "project-manager" || event.scope === "pm") && taskContext) {
         return false;
       }
 
@@ -2634,6 +2657,18 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
       setPendingApproval({ toolName: event.toolName, toolInput: event.toolInput });
     });
 
+    const stopQuestion = window.electronAPI.project.onAgentQuestion?.((event) => {
+      if (!matchesCurrentRequest(event)) return;
+      const expectedScope: "pm" | "task" = taskContext ? "task" : "pm";
+      if (event.question.scope !== expectedScope) return;
+      if (expectedScope === "task" && taskContext && event.question.taskId && event.question.taskId !== taskContext.task.id) return;
+      setPendingQuestion(event.question);
+    });
+
+    const stopQuestionResolved = window.electronAPI.project.onAgentQuestionResolved?.((event) => {
+      setPendingQuestion((prev) => (prev && prev.id === event.questionId ? null : prev));
+    });
+
     return () => {
       stopStarted();
       stopOutput();
@@ -2641,6 +2676,8 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
       stopError();
       stopCancelled();
       stopApprovalRequest?.();
+      stopQuestion?.();
+      stopQuestionResolved?.();
       liveSetScrollCallback(null);
     };
   }, [activeProject.id, activeTaskThread?.id, liveFinalize, liveProcessChunk, liveResetEvents, liveSetScrollCallback, liveStartStreaming, taskContext]);
@@ -2664,6 +2701,11 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
         }
         // Only reconnect if the active request belongs to this project
         if (req.projectId && req.projectId !== activeProject.id) return;
+        // Solo-chat runs belong to the freestyle/code page — show a banner, do NOT reconnect here.
+        if (req.scope === "solo-chat" || req.scope === "solo") {
+          setOtherAgentMeta({ scope: req.scope, taskName: req.sessionTitle, sessionId: req.sessionId });
+          return;
+        }
         // If the active request belongs to a different task, show a banner instead of reconnecting
         if (req.taskId && (!taskContextTaskId || req.taskId !== taskContextTaskId)) {
           const reqTaskName = req.taskName || (() => {
@@ -2705,10 +2747,44 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
             }
           }
         } catch { /* ignore */ }
+        // Recover any pending clarifying question
+        try {
+          const pendingQ = await window.electronAPI?.project?.getPendingQuestion?.();
+          if (!cancelled && pendingQ && (!pendingQ.projectId || pendingQ.projectId === activeProject.id)) {
+            const expectedScope: "pm" | "task" = taskContextTaskId ? "task" : "pm";
+            const scopeOk = pendingQ.scope === expectedScope;
+            const taskOk = expectedScope !== "task" || !pendingQ.taskId || pendingQ.taskId === taskContextTaskId;
+            if (scopeOk && taskOk) setPendingQuestion(pendingQ);
+          }
+        } catch { /* ignore */ }
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
   }, [activeProject.id, liveProcessChunk, liveStartStreaming, planSubprojects, taskContextTaskId]);
+
+  // Clear the cross-chat banner when a Freestyle/solo execution finishes.
+  // The main PM listener intentionally ignores solo-chat events, so this
+  // narrow listener prevents stale "Agent running in Freestyle" UI.
+  useEffect(() => {
+    if (!window.electronAPI?.project) return;
+    const clearSoloBanner = (event: { projectId?: string; scope?: string; sessionId?: string }) => {
+      if (event.projectId && event.projectId !== activeProject.id) return;
+      if (event.scope !== "solo-chat") return;
+      setOtherAgentMeta((prev) => {
+        if (!prev || prev.scope !== "solo-chat") return prev;
+        if (event.sessionId && prev.sessionId && event.sessionId !== prev.sessionId) return prev;
+        return null;
+      });
+    };
+    const stopCompleted = window.electronAPI.project.onAgentCompleted?.(clearSoloBanner);
+    const stopError = window.electronAPI.project.onAgentError?.(clearSoloBanner);
+    const stopCancelled = window.electronAPI.project.onAgentCancelled?.(clearSoloBanner);
+    return () => {
+      stopCompleted?.();
+      stopError?.();
+      stopCancelled?.();
+    };
+  }, [activeProject.id]);
 
   // ── Safety watchdog: detect stuck isGenerating state ─────────
   useEffect(() => {
@@ -3855,6 +3931,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
     attachments?: ComposerAttachment[];
     modelId?: string;
     replaceFromMessageId?: string;
+    forceAnalyze?: boolean;
   }) => {
     const draftPrompt = options?.prompt ?? prompt;
     const trimmedPrompt = draftPrompt.trim();
@@ -3901,6 +3978,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
           attachedFiles: attachmentPaths,
           replaceFromMessageId,
           approvalMode: composerApprovalMode === "default" ? settingsApprovalMode : composerApprovalMode,
+          mode: chatMode,
         });
         setEditingMessageId(null);
       } catch (error) {
@@ -3931,8 +4009,6 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
       return;
     }
 
-    const isFollowUp = hasPlan;
-
     try {
       isGeneratingViaAwaitRef.current = true;
       setIsGenerating(true);
@@ -3951,19 +4027,22 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
       setAttachedFiles([]);
       setEditingMessageId(null);
 
-      if (isFollowUp && window.electronAPI.project.sendPMMessage) {
+      // PM chat always uses sendPMMessage — plan mode only, never generates subprojects/tasks.
+      // Exception: forceAnalyze=true is used by "Create Project Dashboard" for imported projects.
+      if (options?.forceAnalyze && window.electronAPI.project.generatePlan) {
+        await window.electronAPI.project.generatePlan({
+          projectId: activeProject.id,
+          prompt: buildPromptWithAttachments(trimmedPrompt, currentAttachments),
+          model: currentModelId,
+        });
+      } else if (window.electronAPI.project.sendPMMessage) {
         await window.electronAPI.project.sendPMMessage({
           projectId: activeProject.id,
           prompt: buildPromptWithAttachments(trimmedPrompt, currentAttachments),
           model: currentModelId,
           attachedFiles: attachmentPaths,
           replaceFromMessageId,
-        });
-      } else {
-        await window.electronAPI.project.generatePlan({
-          projectId: activeProject.id,
-          prompt: buildPromptWithAttachments(trimmedPrompt, currentAttachments),
-          model: currentModelId,
+          mode: chatMode,
         });
       }
       setEditingMessageId(null);
@@ -3991,9 +4070,9 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
     activeProject.id,
     activeTaskThread?.id,
     attachedFiles,
+    chatMode,
     composerApprovalMode,
     editingMessageId,
-    hasPlan,
     liveFinalize,
     liveResetEvents,
     liveStartStreaming,
@@ -4091,7 +4170,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
       ? `Analyze this existing codebase and map out what has already been built. Group the work into subprojects, mark completed features as done, partially built features as building, and remaining work as planned. Focus on giving a clear picture of current project state and the best next steps.`
       : `Analyze this project and create a comprehensive project plan. Identify the tech stack, current state, what's been built, and what remains. Generate subprojects and tasks that reflect the existing work and clear next steps. Mark completed work as done.`;
     setPrompt(analysisPrompt);
-    void handleGeneratePlan({ prompt: analysisPrompt });
+    void handleGeneratePlan({ prompt: analysisPrompt, forceAnalyze: true });
   };
 
   if (!hasConversation && !hasPlan && !isGenerating) {
@@ -4127,7 +4206,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                       <p className="mt-3 text-[11px] theme-muted">Analyzes the repo, creates tasks, and sets up the execution plan.</p>
                     </>
                   ) : (
-                    <p className="mx-auto max-w-xl text-[14px] leading-relaxed theme-muted">Start by explaining what you want to build. The PM will shape the plan, then you can move straight into task threads and preview.</p>
+                    <p className="mx-auto max-w-xl text-[14px] leading-relaxed theme-muted">Describe what you want to build and the PM will help shape a plan.</p>
                   )}
                   </div>
                   {(() => {
@@ -4201,6 +4280,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                   onDragLeave={handleDragLeave}
                   onDrop={handleDropFiles}
                   featureFlags={featureFlags}
+                  isPMChat={isPMChat}
                 />
               </div>
             </div>
@@ -4651,6 +4731,23 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                       />
                     )}
 
+                    {message.isAI && message.planId ? (
+                      (() => {
+                        const linked = { planId: message.planId, title: message.planTitle || "Plan" };
+                        if (!linked) return null;
+                        return (
+                          <Link
+                            href={`/project/plans?id=${encodeURIComponent(linked.planId)}`}
+                            className="mt-2 inline-flex items-center gap-2 rounded-lg border border-violet/30 bg-violet/10 px-3 py-1.5 text-[11px] font-semibold text-violet transition hover:bg-violet/20"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3 w-3"><path d="M3.5 4.5A1.5 1.5 0 015 3h10a1.5 1.5 0 011.5 1.5v11A1.5 1.5 0 0115 17H5a1.5 1.5 0 01-1.5-1.5v-11zM6 6.75A.75.75 0 016.75 6h6.5a.75.75 0 010 1.5h-6.5A.75.75 0 016 6.75zm.75 3.25a.75.75 0 000 1.5h6.5a.75.75 0 000-1.5h-6.5zm0 3.5a.75.75 0 000 1.5h4a.75.75 0 000-1.5h-4z" /></svg>
+                            <span className="truncate">Plan: {linked.title}</span>
+                            <span className="text-violet/70">→</span>
+                          </Link>
+                        );
+                      })()
+                    ) : null}
+
                     {selectedBuildArtifact && selectedBuildMessageId === message.id ? (
                       <InlineBuildPanel
                         artifact={selectedBuildArtifact}
@@ -4767,7 +4864,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                       : stream.scope === "project-manager"
                         ? "/project/chat"
                         : stream.scope === "solo-chat"
-                          ? "/project/code"
+                          ? (stream.sessionId ? `/project/code?session=${encodeURIComponent(stream.sessionId)}` : "/project/code")
                           : null;
 
                     return (
@@ -4894,7 +4991,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                         : otherAgentMeta.scope === "project-manager"
                           ? "/project/chat"
                           : otherAgentMeta.scope === "solo-chat"
-                            ? "/project/code"
+                            ? (otherAgentMeta.sessionId ? `/project/code?session=${encodeURIComponent(otherAgentMeta.sessionId)}` : "/project/code")
                             : "/project/chat"}
                       className="group flex items-center gap-2 rounded-full bg-violet-500/8 px-3.5 py-2 ring-1 ring-violet-500/15 transition hover:bg-violet-500/14 hover:ring-violet-500/25"
                     >
@@ -5027,6 +5124,23 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                             </div>
                           </div>
                         ) : null}
+                        {/* Clarifying question card — shown when agent asked the user something */}
+                        {pendingQuestion ? (
+                          <QuestionCard
+                            question={pendingQuestion}
+                            onAnswer={({ answer, optionId }) => {
+                              const q = pendingQuestion;
+                              setPendingQuestion(null);
+                              void window.electronAPI?.project?.answerAgentQuestion?.({ id: q.id, answer, optionId });
+                              // If the run already finished (markdown question), feed the answer as the next prompt.
+                              if (!isGenerating) {
+                                setPrompt(answer);
+                                void handleGeneratePlan({ prompt: answer });
+                              }
+                            }}
+                            onDismiss={() => setPendingQuestion(null)}
+                          />
+                        ) : null}
                         {/* Interrupt input */}
                         <div className="border-t border-black/[0.04] px-3.5 py-2 dark:border-white/[0.06]">
                           <div className="flex items-center gap-2">
@@ -5136,6 +5250,7 @@ function RealProjectChatPage({ activeProject }: RealProjectChatProps) {
                 onDragLeave={handleDragLeave}
                 onDrop={handleDropFiles}
                 featureFlags={featureFlags}
+                isPMChat={isPMChat}
               />
             </div>
           </div>
@@ -5692,7 +5807,14 @@ function RealProjectChatBubble({
           )}
         </div>
         {message.isAI ? (
-          <RunSummaryCard text={message.text} />
+          message.planId ? (
+            <div className="rounded-2xl border border-violet/20 bg-violet/5 px-4 py-3 text-[13px] leading-relaxed theme-fg dark:bg-violet/10">
+              <p className="font-semibold">Plan ready{message.planTitle ? `: ${message.planTitle}` : ""}.</p>
+              <p className="mt-1 text-[12.5px] theme-soft">Open the project plan in the workspace to view the steps and start executing it.</p>
+            </div>
+          ) : (
+            <RunSummaryCard text={message.text} />
+          )
         ) : (
           <PromptCard text={message.text} showEdit={false} />
         )}
@@ -5736,6 +5858,7 @@ function RealProjectComposer({
   onDragLeave,
   onDrop,
   featureFlags,
+  isPMChat = false,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -5782,6 +5905,7 @@ function RealProjectComposer({
   onDragLeave: (event: React.DragEvent<HTMLDivElement>) => void;
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
   featureFlags?: FeatureFlags;
+  isPMChat?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -5811,7 +5935,7 @@ function RealProjectComposer({
   const [modelMenuPos, setModelMenuPos] = useState<{ left: number; bottom: number } | null>(null);
   const [editingContext, setEditingContext] = useState(false);
   const [editedContext, setEditedContext] = useState("");
-  const [chatMode, setChatMode] = useState<"agent" | "ask" | "plan">("agent");
+  const [chatMode, setChatMode] = useState<"agent" | "ask" | "plan">(isPMChat ? "plan" : "agent");
   const isDark = typeof document !== "undefined" && document.documentElement.classList.contains("dark");
 
   const cs = catalogs ?? { copilot: DEFAULT_copilotModels, claude: DEFAULT_claudeModels, codex: DEFAULT_codexModels };
@@ -6177,19 +6301,21 @@ function RealProjectComposer({
                 ) : null}
               </button>
 
-              {/* Mode toggle — Agent / Ask / Plan */}
-              <div className="inline-flex items-center rounded-full bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
-                {(["agent", "ask", "plan"] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setChatMode(mode)}
-                    className={`rounded-full px-2.5 py-1 text-[10px] font-semibold capitalize transition ${chatMode === mode ? "bg-white text-ink shadow-sm dark:bg-[#2a2a2a] dark:text-[var(--fg)]" : "text-ink-muted/60 hover:text-ink dark:text-[var(--muted)] dark:hover:text-[var(--fg)]"}`}
-                  >
-                    {mode}
-                  </button>
-                ))}
-              </div>
+              {/* Mode toggle — Agent / Ask / Plan (hidden in PM chat: always plan-only) */}
+              {!isPMChat && (
+                <div className="inline-flex items-center rounded-full bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
+                  {(["agent", "ask", "plan"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setChatMode(mode)}
+                      className={`rounded-full px-2.5 py-1 text-[10px] font-semibold capitalize transition ${chatMode === mode ? "bg-white text-ink shadow-sm dark:bg-[#2a2a2a] dark:text-[var(--fg)]" : "text-ink-muted/60 hover:text-ink dark:text-[var(--muted)] dark:hover:text-[var(--fg)]"}`}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {/* Approval mode dropdown */}
               <div className="relative">

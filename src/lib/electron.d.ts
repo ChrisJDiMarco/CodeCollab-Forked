@@ -345,6 +345,94 @@ export interface ProjectDashboardState {
   channels: ProjectDashboardChannel[];
   directMessages: ProjectDashboardDirectThread[];
   soloSessions?: SoloSession[];
+  plans?: ProjectPlanV2[];
+  activePlanId?: string | null;
+}
+
+// ---------- Plans v2 (flat, executable plans) ----------
+
+export type ChatMode = "plan" | "agent" | "ask";
+
+// ---------- Agent clarifying questions ----------
+
+export type AgentQuestionScope = "pm" | "task" | "solo";
+
+export interface AgentQuestionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface AgentQuestion {
+  id: string;
+  projectId: string;
+  scope: AgentQuestionScope;
+  taskId?: string;
+  threadId?: string;
+  sessionId?: string;
+  question: string;
+  options?: AgentQuestionOption[];
+  allowCustomResponse: boolean;
+  requestedAt: string;
+  provider?: string;
+  source?: "stdin" | "markdown" | "intercepted-tool";
+}
+
+export type ProjectPlanStatus =
+  | "draft"
+  | "active"
+  | "executing"
+  | "completed"
+  | "archived";
+
+export type PlanStepStatus = "pending" | "running" | "done" | "skipped";
+
+export type PlanSourceKind = "pm-chat" | "task-chat" | "solo-chat" | "manual";
+
+export interface PlanStepV2 {
+  id: string;
+  order: number;
+  text: string;
+  dependsOn?: string[];
+  parallelWith?: string[];
+  status: PlanStepStatus;
+}
+
+export interface PlanFileRefV2 {
+  path: string;
+  note?: string;
+}
+
+export interface PlanSourceV2 {
+  kind: PlanSourceKind;
+  chatId?: string;
+  messageId?: string;
+}
+
+export interface ProjectPlanV2 {
+  id: string;
+  projectId: string;
+  title: string;
+  status: ProjectPlanStatus;
+  tldr: string;
+  steps: PlanStepV2[];
+  relevantFiles: PlanFileRefV2[];
+  verification: string[];
+  decisions?: string[];
+  furtherConsiderations?: string[];
+  rawMarkdown?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  source: PlanSourceV2;
+  executionChatId?: string | null;
+}
+
+export interface SavePlanFromChatPayload {
+  projectId: string;
+  markdown: string;
+  source: PlanSourceV2;
+  title?: string;
 }
 
 export interface ProjectCreatePayload {
@@ -369,6 +457,7 @@ export interface ProjectSendPMMessagePayload {
   model?: string;
   attachedFiles?: string[];
   replaceFromMessageId?: string;
+  mode?: ChatMode;
 }
 
 export interface ProjectSendTaskMessagePayload {
@@ -380,6 +469,7 @@ export interface ProjectSendTaskMessagePayload {
   attachedFiles?: string[];
   replaceFromMessageId?: string;
   approvalMode?: "auto" | "manual";
+  mode?: ChatMode;
 }
 
 export interface ProjectGenerateTaskPromptPayload {
@@ -422,6 +512,7 @@ export interface SendSoloMessagePayload {
   model?: string;
   attachedFiles?: string[];
   replaceFromMessageId?: string;
+  mode?: ChatMode;
 }
 
 export interface SendSoloMessageResult {
@@ -440,6 +531,7 @@ export interface ProjectAgentEvent {
   projectId?: string;
   taskId?: string;
   threadId?: string;
+  sessionId?: string;
   checkpointId?: string;
   scope?: "project-manager" | "task-agent" | "solo-chat";
   phase?: "plan" | "chat";
@@ -773,15 +865,26 @@ export interface ElectronAPI {
     forceResetAgent: (payload?: { repoPath?: string }) => Promise<{ success: boolean }>;
     getActiveRequest: () => Promise<{ active: boolean; projectId?: string; taskId?: string; taskName?: string; threadId?: string; scope?: string; requestId?: string; output?: string; promptText?: string; sessionId?: string; sessionTitle?: string } | null>;
     getPendingApproval: () => Promise<{ toolName: string; toolInput: Record<string, unknown>; projectId?: string; taskId?: string; scope?: string } | null>;
+    getPendingQuestion: () => Promise<AgentQuestion | null>;
+    answerAgentQuestion: (payload: { id: string; answer: string; optionId?: string }) => Promise<{ success: boolean; error?: string }>;
     launchDevServer: (payload: { projectId: string; model?: string }) => Promise<{ output: string; launchCommand: string; expectedPort?: number; previewMode?: "web" | "terminal" }>;
     restoreCheckpoint: (payload: ProjectRestoreCheckpointPayload) => Promise<DesktopProject>;
     compactConversation: (payload: ProjectCompactConversationPayload) => Promise<DesktopProject>;
+    listPlans: (projectId: string) => Promise<ProjectPlanV2[]>;
+    savePlanV2: (payload: { plan: ProjectPlanV2 }) => Promise<ProjectPlanV2>;
+    deletePlanV2: (payload: { projectId: string; planId: string }) => Promise<{ deleted: boolean }>;
+    setActivePlan: (payload: { projectId: string; planId: string | null }) => Promise<{ activePlanId: string | null }>;
+    archivePlan: (payload: { projectId: string; planId: string }) => Promise<ProjectPlanV2>;
+    executePlan: (payload: { projectId: string; planId: string; model?: string }) => Promise<{ chatId: string; planId: string }>;
+    savePlanFromChatMessage: (payload: SavePlanFromChatPayload) => Promise<ProjectPlanV2>;
     onAgentStarted: (callback: (event: ProjectAgentEvent) => void) => () => void;
     onAgentOutput: (callback: (event: ProjectAgentEvent) => void) => () => void;
     onAgentCompleted: (callback: (event: ProjectAgentEvent) => void) => () => void;
     onAgentError: (callback: (event: ProjectAgentEvent) => void) => () => void;
     onAgentCancelled: (callback: (event: ProjectAgentEvent) => void) => () => void;
     onAgentApprovalRequest: (callback: (event: ProjectAgentEvent & { toolName: string; toolInput: Record<string, unknown> }) => void) => () => void;
+    onAgentQuestion: (callback: (event: ProjectAgentEvent & { question: AgentQuestion }) => void) => () => void;
+    onAgentQuestionResolved: (callback: (event: ProjectAgentEvent & { questionId: string; answer: string; optionId?: string }) => void) => () => void;
   };
   tools: {
     listStatus: () => Promise<ToolStatus[]>;

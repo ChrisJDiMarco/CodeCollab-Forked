@@ -15,6 +15,8 @@ function createDefaultDashboard(systemPromptMarkdown = "", initialPrompt = "") {
     channels: [],
     directMessages: [],
     soloSessions: [],
+    plans: [],
+    activePlanId: null,
   };
 }
 
@@ -41,6 +43,8 @@ type ActiveDesktopProject = {
     channels: unknown[];
     directMessages: unknown[];
     soloSessions?: { id: string; title: string; createdAt: string; updatedAt: string; lastModel: string | null; messages: { id: string; from: string; text: string; isAI?: boolean; isMine?: boolean }[] }[];
+    plans?: unknown[];
+    activePlanId?: string | null;
   };
 };
 
@@ -77,6 +81,8 @@ function normalizeActiveProject(project: Partial<ActiveDesktopProject> | null): 
       channels: Array.isArray(project.dashboard?.channels) ? project.dashboard.channels : [],
       directMessages: Array.isArray(project.dashboard?.directMessages) ? project.dashboard.directMessages : [],
       soloSessions: Array.isArray(project.dashboard?.soloSessions) ? project.dashboard.soloSessions : [],
+      plans: Array.isArray(project.dashboard?.plans) ? project.dashboard.plans : [],
+      activePlanId: project.dashboard?.activePlanId ?? null,
     },
   };
 }
@@ -100,10 +106,26 @@ export function useActiveDesktopProject() {
 
     const makeKey = (p: ActiveDesktopProject | null) => {
       if (!p) return "";
-      // Fields the workspace actually depends on. The dashboard.plan is small
-      // (subprojects + tasks — typically <50KB). Everything else in dashboard
-      // is NOT used on the workspace render path, so we deliberately ignore it.
+      // Lightweight signatures for fields the app renders frequently. Avoid
+      // stringifying full chat histories, but include enough message/session
+      // metadata that saved agent responses update chat screens immediately.
       try {
+        const conversationSig = (p.dashboard.conversation ?? []).map((entry) => {
+          const message = entry as { id?: string; time?: string; text?: string } | null;
+          return message ? `${message.id ?? ""}:${message.time ?? ""}:${message.text?.length ?? 0}` : "";
+        }).join(",");
+        const taskThreadsSig = (p.dashboard.taskThreads ?? []).map((entry) => {
+          const thread = entry as { id?: string; updatedAgo?: string; messages?: Array<{ id?: string; time?: string; text?: string }> } | null;
+          const messages = thread?.messages ?? [];
+          const last = messages[messages.length - 1];
+          return thread ? `${thread.id ?? ""}:${thread.updatedAgo ?? ""}:${messages.length}:${last?.id ?? ""}:${last?.time ?? ""}:${last?.text?.length ?? 0}` : "";
+        }).join(",");
+        const soloSessionsSig = (p.dashboard.soloSessions ?? []).map((entry) => {
+          const session = entry as { id?: string; updatedAt?: string; messages?: Array<{ id?: string; time?: string; text?: string }> } | null;
+          const messages = session?.messages ?? [];
+          const last = messages[messages.length - 1];
+          return session ? `${session.id ?? ""}:${session.updatedAt ?? ""}:${messages.length}:${last?.id ?? ""}:${last?.time ?? ""}:${last?.text?.length ?? 0}` : "";
+        }).join(",");
         return [
           p.id,
           p.name,
@@ -115,7 +137,16 @@ export function useActiveDesktopProject() {
           p.githubRepoUrl ?? "",
           p.updatedAt,
           JSON.stringify(p.dashboard.plan ?? null),
-          (p.dashboard.taskThreads?.length ?? 0),
+          conversationSig,
+          taskThreadsSig,
+          soloSessionsSig,
+          (p.dashboard.plans?.length ?? 0),
+          p.dashboard.activePlanId ?? "",
+          // include plan list updatedAt timestamps so renames/status changes invalidate
+          JSON.stringify((p.dashboard.plans ?? []).map((pl) => {
+            const plan = pl as { id?: string; updatedAt?: string; status?: string } | null;
+            return plan ? `${plan.id ?? ""}:${plan.updatedAt ?? ""}:${plan.status ?? ""}` : "";
+          })),
         ].join("|");
       } catch {
         return String(Math.random());

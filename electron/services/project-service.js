@@ -250,6 +250,8 @@ function buildEmptyDashboardState(initialPrompt, systemPromptMarkdown) {
     channels: [],
     directMessages: [],
     soloSessions: [],
+    plans: [],
+    activePlanId: null,
   };
 }
 
@@ -394,6 +396,372 @@ function normalizeGeneratedPlan(project, prompt, payload) {
   };
 }
 
+// ─── Plans v2 (flat, executable plans) ──────────────────────────────────
+
+const PLAN_V2_VALID_STATUSES = new Set([
+  "draft",
+  "active",
+  "executing",
+  "completed",
+  "archived",
+]);
+
+const PLAN_STEP_VALID_STATUSES = new Set([
+  "pending",
+  "running",
+  "done",
+  "skipped",
+]);
+
+function generatePlanV2Id() {
+  return `plan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function generatePlanStepId(planId, index) {
+  return `${planId}-s${index + 1}`;
+}
+
+function normalizeProjectPlanV2(rawPlan, fallbackProjectId) {
+  const now = new Date().toISOString();
+  const plan = rawPlan && typeof rawPlan === "object" ? rawPlan : {};
+  const id = typeof plan.id === "string" && plan.id.trim() ? plan.id.trim() : generatePlanV2Id();
+  const projectId = typeof plan.projectId === "string" && plan.projectId.trim()
+    ? plan.projectId.trim()
+    : fallbackProjectId;
+
+  if (!projectId) {
+    throw new Error("Plan requires a projectId.");
+  }
+
+  const status = PLAN_V2_VALID_STATUSES.has(plan.status) ? plan.status : "draft";
+
+  const stepsInput = Array.isArray(plan.steps) ? plan.steps : [];
+  const steps = stepsInput.map((step, index) => {
+    const obj = step && typeof step === "object" ? step : {};
+    return {
+      id: typeof obj.id === "string" && obj.id ? obj.id : generatePlanStepId(id, index),
+      order: Number.isFinite(obj.order) ? Number(obj.order) : index + 1,
+      text: typeof obj.text === "string" ? obj.text.trim() : String(obj.text ?? "").trim(),
+      dependsOn: Array.isArray(obj.dependsOn) ? obj.dependsOn.filter((d) => typeof d === "string") : undefined,
+      parallelWith: Array.isArray(obj.parallelWith) ? obj.parallelWith.filter((d) => typeof d === "string") : undefined,
+      status: PLAN_STEP_VALID_STATUSES.has(obj.status) ? obj.status : "pending",
+    };
+  }).filter((step) => step.text);
+
+  const relevantFiles = (Array.isArray(plan.relevantFiles) ? plan.relevantFiles : [])
+    .map((file) => {
+      if (!file) return null;
+      if (typeof file === "string") return { path: file.trim() };
+      if (typeof file === "object") {
+        const p = typeof file.path === "string" ? file.path.trim() : "";
+        if (!p) return null;
+        const note = typeof file.note === "string" ? file.note.trim() : "";
+        return note ? { path: p, note } : { path: p };
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+  const verification = (Array.isArray(plan.verification) ? plan.verification : [])
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter(Boolean);
+
+  const decisions = (Array.isArray(plan.decisions) ? plan.decisions : [])
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter(Boolean);
+
+  const furtherConsiderations = (Array.isArray(plan.furtherConsiderations) ? plan.furtherConsiderations : [])
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter(Boolean);
+
+  const source = plan.source && typeof plan.source === "object" ? plan.source : { kind: "manual" };
+  const sourceKind = ["pm-chat", "task-chat", "solo-chat", "manual"].includes(source.kind) ? source.kind : "manual";
+
+  return {
+    id,
+    projectId,
+    title: typeof plan.title === "string" && plan.title.trim() ? plan.title.trim().slice(0, 200) : "Untitled plan",
+    status,
+    tldr: typeof plan.tldr === "string" ? plan.tldr.trim() : "",
+    steps,
+    relevantFiles,
+    verification,
+    decisions: decisions.length ? decisions : undefined,
+    furtherConsiderations: furtherConsiderations.length ? furtherConsiderations : undefined,
+    rawMarkdown: typeof plan.rawMarkdown === "string" ? plan.rawMarkdown : undefined,
+    createdAt: typeof plan.createdAt === "string" ? plan.createdAt : now,
+    updatedAt: now,
+    createdBy: typeof plan.createdBy === "string" ? plan.createdBy : undefined,
+    source: {
+      kind: sourceKind,
+      chatId: typeof source.chatId === "string" ? source.chatId : undefined,
+      messageId: typeof source.messageId === "string" ? source.messageId : undefined,
+    },
+    executionChatId: typeof plan.executionChatId === "string" ? plan.executionChatId : null,
+  };
+}
+
+/**
+/**
+ * Detect a clarifying-question block in agent markdown output.
+ *
+ * Recognises sections introduced by headings like "Attention User Input Required",
+ * "Question for User", or "Need clarification" (case-insensitive). When an
+ * unordered list immediately follows the question paragraph, list items become
+ * options. Returns null when no question is present.
+ */
+function extractQuestionFromMarkdown(text) {
+  const src = typeof text === "string" ? text : "";
+  if (!src.trim()) return null;
+  const headingRe = /^\s{0,3}#{1,4}\s*(?:\u26a0\ufe0f?\s*)?(attention\s*[:\-]?\s*user\s*input\s*required|user\s*input\s*required|question\s*for\s*user|need\s*clarification|clarifying\s*question)\b.*$/im;
+  const m = src.match(headingRe);
+  if (!m) return null;
+  const after = src.slice((m.index ?? 0) + m[0].length);
+  // Stop at the next heading of equal-or-higher level or end of doc.
+  const stopRe = /^\s{0,3}#{1,4}\s+\S/m;
+  const stop = after.match(stopRe);
+  const block = (stop ? after.slice(0, stop.index) : after).trim();
+  if (!block) return null;
+  // Split into question text + bullet options.
+  const blockLines = block.split(/\r?\n/);
+  const bulletRe = /^\s*(?:[-*+]|\d+[.)])\s+(.*\S)\s*$/;
+  const options = [];
+  const questionLines = [];
+  let inBullets = false;
+  for (const line of blockLines) {
+    const bm = line.match(bulletRe);
+    if (bm) {
+      inBullets = true;
+      options.push({ id: `opt-${options.length + 1}`, label: bm[1] });
+    } else if (!inBullets) {
+      questionLines.push(line);
+    }
+  }
+  const question = questionLines.join("\n").trim();
+  if (!question && !options.length) return null;
+  return {
+    question: question || "Please clarify how you want to proceed.",
+    options: options.length ? options : undefined,
+    allowCustomResponse: true,
+  };
+}
+
+/**
+ * Tolerant parser that turns plan-mode markdown into a structured ProjectPlan.
+ * Falls back gracefully — even malformed output produces a usable record with
+ * the original markdown preserved in `rawMarkdown`.
+ */
+function parsePlanMarkdown(markdown, { projectId, source, title } = {}) {
+  const text = typeof markdown === "string" ? markdown : "";
+  const lines = text.split(/\r?\n/);
+
+  // Title — first level-1 or level-2 heading, or fall back to provided/derived.
+  let derivedTitle = title;
+  if (!derivedTitle) {
+    const headingMatch = text.match(/^\s{0,3}#{1,3}\s+(?:Plan(?::|\s*-)?\s*)?(.+?)\s*$/m);
+    if (headingMatch) derivedTitle = headingMatch[1].trim();
+  }
+  if (!derivedTitle) derivedTitle = "New plan";
+
+  // Helper: extract a section's bulleted/numbered items by heading regex.
+  const extractSectionLines = (headingRegex) => {
+    const result = [];
+    let inSection = false;
+    for (const line of lines) {
+      const isHeading = /^\s{0,3}#{1,6}\s+/.test(line) || /^\s*\*\*[^*]+\*\*\s*:?\s*$/.test(line);
+      if (inSection && isHeading) break;
+      if (headingRegex.test(line)) {
+        inSection = true;
+        continue;
+      }
+      if (inSection) result.push(line);
+    }
+    return result;
+  };
+
+  const collectListItems = (sectionLines) => {
+    const items = [];
+    for (const raw of sectionLines) {
+      const m = raw.match(/^\s*(?:\d+\.|[-*+])\s+(.+?)\s*$/);
+      if (m) items.push(m[1].trim());
+    }
+    return items;
+  };
+
+  const collectParagraph = (sectionLines) => {
+    const para = sectionLines.map((l) => l.trim()).filter(Boolean).join(" ").trim();
+    return para;
+  };
+
+  // TL;DR — paragraph after a "TL;DR" or "Summary" heading; else first non-heading paragraph.
+  let tldr = collectParagraph(extractSectionLines(/^\s{0,3}#{1,6}\s+(tl;dr|summary)\b/i));
+  if (!tldr) {
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (/^#{1,6}\s+/.test(trimmed)) continue;
+      if (/^[-*+]\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed)) break;
+      tldr = trimmed;
+      break;
+    }
+  }
+  tldr = tldr.slice(0, 600);
+
+  // Steps — under "Steps" / "Plan steps" / "Implementation"
+  let stepLines = extractSectionLines(/^\s{0,3}#{1,6}\s+(steps?|plan\s+steps?|implementation)\b/i);
+  if (stepLines.length === 0) {
+    // bold "Steps" label fallback
+    stepLines = extractSectionLines(/^\s*\*\*\s*steps?\s*\*\*/i);
+  }
+  let stepStrings = collectListItems(stepLines);
+  if (stepStrings.length === 0) {
+    // Fallback: any numbered list anywhere in the doc
+    stepStrings = collectListItems(lines).slice(0, 30);
+  }
+  if (stepStrings.length === 0 && tldr) {
+    // Last-resort: create a single step from the TL;DR so the plan is never empty
+    stepStrings = [tldr.slice(0, 300)];
+  }
+
+  const planId = generatePlanV2Id();
+  const steps = stepStrings.map((textValue, idx) => ({
+    id: generatePlanStepId(planId, idx),
+    order: idx + 1,
+    text: textValue,
+    status: "pending",
+  }));
+
+  // Relevant files
+  const fileSection = extractSectionLines(/^\s{0,3}#{1,6}\s+(relevant\s+files|files|key\s+files)\b/i);
+  const fileItems = collectListItems(fileSection);
+  const relevantFiles = fileItems.map((item) => {
+    // "[path](path) — note" or "path — note" or just "path"
+    const linkMatch = item.match(/\[([^\]]+)\]\(([^)]+)\)\s*(?:[—–-]\s*(.+))?/);
+    if (linkMatch) {
+      const note = linkMatch[3]?.trim();
+      return note ? { path: linkMatch[2].trim(), note } : { path: linkMatch[2].trim() };
+    }
+    const dashMatch = item.match(/^([^—–-]+?)\s*[—–-]\s*(.+)$/);
+    if (dashMatch) return { path: dashMatch[1].trim(), note: dashMatch[2].trim() };
+    return { path: item.trim() };
+  }).filter((f) => f.path);
+
+  // Verification
+  const verification = collectListItems(
+    extractSectionLines(/^\s{0,3}#{1,6}\s+(verification|verify|how\s+to\s+verify|tests?)\b/i)
+  );
+
+  // Decisions
+  const decisions = collectListItems(
+    extractSectionLines(/^\s{0,3}#{1,6}\s+(decisions?|decision\s+log)\b/i)
+  );
+
+  // Further considerations
+  const furtherConsiderations = collectListItems(
+    extractSectionLines(/^\s{0,3}#{1,6}\s+(further\s+considerations?|open\s+questions?|considerations?)\b/i)
+  );
+
+  return normalizeProjectPlanV2({
+    id: planId,
+    projectId,
+    title: derivedTitle.slice(0, 200),
+    status: "draft",
+    tldr,
+    steps,
+    relevantFiles,
+    verification,
+    decisions,
+    furtherConsiderations,
+    rawMarkdown: text,
+    source: source || { kind: "pm-chat" },
+  }, projectId);
+}
+
+function buildPlanModePromptContext(project) {
+  const sections = [];
+  sections.push(`Project: ${project.name}`);
+  if (project.description) sections.push(`Description: ${project.description}`);
+  sections.push(`Stage: ${project.stage || "Planning"}`);
+
+  const plans = Array.isArray(project.dashboard?.plans) ? project.dashboard.plans : [];
+  const activePlanId = project.dashboard?.activePlanId;
+  const activePlan = plans.find((p) => p && p.id === activePlanId);
+  if (activePlan) {
+    sections.push("");
+    sections.push(`Active plan: ${activePlan.title}`);
+    if (activePlan.tldr) sections.push(`Active plan TL;DR: ${activePlan.tldr}`);
+  }
+
+  const subprojects = project.dashboard?.plan?.subprojects ?? [];
+  if (subprojects.length > 0) {
+    sections.push("");
+    sections.push("Existing manual subprojects (for awareness — do not duplicate):");
+    subprojects.forEach((sub) => {
+      sections.push(`- ${sub.title}: ${sub.goal || ""}`);
+    });
+  }
+
+  return sections.join("\n");
+}
+
+const PLAN_MODE_INSTRUCTIONS = [
+  "---",
+  "PLAN MODE — MANDATORY OUTPUT FORMAT",
+  "---",
+  "You are operating in PLAN MODE. Your ONLY job is to produce a structured plan.",
+  "Do NOT write code. Do NOT run commands. Do NOT modify files.",
+  "Do NOT add any conversational text before or after the plan.",
+  "You MUST respond using EXACTLY this markdown template — no other format is acceptable:",
+  "",
+  "## Plan: <short title>",
+  "",
+  "### TL;DR",
+  "<2-4 sentence executive summary of the goal and approach>",
+  "",
+  "### Steps",
+  "1. <first concrete, actionable step>",
+  "2. <second step>",
+  "3. <continue — keep steps small, ordered, and verifiable>",
+  "",
+  "### Relevant files",
+  "- `path/to/file.ts` — <one-line note on why this file matters>",
+  "",
+  "### Verification",
+  "- <how to confirm the plan is fully implemented>",
+  "",
+  "### Decisions",
+  "- <key decisions made while planning, with brief rationale>",
+  "",
+  "### Further Considerations",
+  "- <follow-ups, open questions, or scope cuts deferred to later>",
+  "",
+  "IMPORTANT RULES:",
+  "- Start your response with `## Plan:` — nothing before it.",
+  "- The Steps section MUST contain a numbered list. Every item must begin with a number and period (1. 2. 3.).",
+  "- Keep steps independent and parallelisable when possible.",
+  "- Be concrete. Avoid vague language — state the specific change.",
+  "- If information is missing, add it to Further Considerations.",
+  "---",
+].join("\n");
+
+const ASK_MODE_INSTRUCTIONS = [
+  "---",
+  "ASK MODE — READ-ONLY CONSULTATION",
+  "---",
+  "You are operating in ASK MODE. The user wants advice or information, not action.",
+  "Do NOT call tools. Do NOT edit files. Do NOT run shell commands.",
+  "If you need information you don't have, ask the user a single, focused clarifying question",
+  "using this exact heading so the UI can surface it:",
+  "",
+  "## Attention User Input Required",
+  "<your question to the user, plain prose>",
+  "- option one (optional bullet list of likely answers)",
+  "- option two",
+  "",
+  "Otherwise, answer directly and concisely. Cite file paths when referring to code.",
+  "---",
+].join("\n");
+
 function findTaskPlanContext(project, taskId) {
   const subprojects = project.dashboard?.plan?.subprojects ?? [];
 
@@ -406,6 +774,7 @@ function findTaskPlanContext(project, taskId) {
 
   return null;
 }
+
 
 function buildConversationTranscript(messages = []) {
   return messages
@@ -852,7 +1221,7 @@ const RESPONSE_SUMMARY_INSTRUCTIONS = [
   "",
 ].join("\n");
 
-function buildTaskAgentSystemPrompt(taskContext, thread) {
+function buildTaskAgentSystemPrompt(taskContext, thread, { mode } = {}) {
   return [
     "You are a hands-on task agent inside CodeCollab — a desktop coding workspace that keeps everything native to the platform.",
     "Do the task work and reply like a collaborator in chat.",
@@ -897,6 +1266,8 @@ function buildTaskAgentSystemPrompt(taskContext, thread) {
     "This section MUST ALWAYS be the very last thing in your response (before the Summary and TASK_STATUS metadata lines), with no other content after it except Summary and TASK_STATUS.",
     "If no user input is required, do not include this section at all.",
     "",
+    mode === "plan" ? PLAN_MODE_INSTRUCTIONS : "",
+    mode === "ask" ? ASK_MODE_INSTRUCTIONS : "",
     RESPONSE_SUMMARY_INSTRUCTIONS,
     "",
     "End EVERY reply with exactly one metadata line: TASK_STATUS: planned, TASK_STATUS: building, TASK_STATUS: review, or TASK_STATUS: done.",
@@ -1209,6 +1580,33 @@ function createProjectService({ app, settingsService, toolingService, p2pService
   const _catalogs = toolingService.getModelCatalogs();
   const CLAUDE_CLI_MODEL_IDS = new Set((_catalogs.claude || []).map(m => m.id));
   const CODEX_CLI_MODEL_IDS = new Set((_catalogs.codex || []).map(m => m.id));
+  const COPILOT_CLI_MODEL_IDS = new Set((_catalogs.copilot || []).map(m => m.id));
+
+  /**
+   * Pick a sensible default model for the current user.
+   * Honors `projectDefaults.copilotModel` only if it belongs to an enabled
+   * provider — otherwise falls back to the first model of the first enabled
+   * provider so users without GitHub Copilot don't get stuck routing to it.
+   */
+  function pickDefaultModel(settings) {
+    const stored = settings.projectDefaults?.copilotModel?.trim?.() || "";
+    const hasClaude = !!settings.featureFlags?.claudeCode;
+    const hasCopilot = !!settings.featureFlags?.githubCopilotCli;
+    const hasCodex = !!settings.featureFlags?.codexCli;
+
+    // If the stored default is for an enabled provider, use it.
+    if (stored) {
+      if (COPILOT_CLI_MODEL_IDS.has(stored) && hasCopilot) return stored;
+      if (CLAUDE_CLI_MODEL_IDS.has(stored) && hasClaude) return stored;
+      if (CODEX_CLI_MODEL_IDS.has(stored) && hasCodex) return stored;
+    }
+
+    // Fall back to first model of first enabled provider.
+    if (hasClaude && (_catalogs.claude || []).length > 0) return _catalogs.claude[0].id;
+    if (hasCopilot && (_catalogs.copilot || []).length > 0) return _catalogs.copilot[0].id;
+    if (hasCodex && (_catalogs.codex || []).length > 0) return _catalogs.codex[0].id;
+    return stored || "";
+  }
 
   /**
    * Determine which AI provider to route to based on feature flags and selected model.
@@ -1430,7 +1828,14 @@ function createProjectService({ app, settingsService, toolingService, p2pService
         return await runProgram(retry.cli, retry.args, cwd, requestMeta, retry.stdinData || null, retry.streamJson || false, retry.copilotJson || false, retry.codexJson || false, retry.manualApproval || false);
       }
       const classified = classifyAgentError(err, provider, cli);
-      throw classified || err;
+      if (classified) {
+        // Preserve original error properties so callers can recover partial output.
+        if (err.stdout != null) classified.stdout = err.stdout;
+        if (err.stderr != null) classified.stderr = err.stderr;
+        if (err.exitCode != null) classified.exitCode = err.exitCode;
+        throw classified;
+      }
+      throw err;
     }
   }
 
@@ -1685,6 +2090,8 @@ function createProjectService({ app, settingsService, toolingService, p2pService
   let activeRequestOutput = "";  // Accumulated stdout — persists across renderer navigation
   let activePendingApproval = null;  // Last approval request — survives renderer navigation
   const cancelledChildProcesses = new WeakMap();
+  /** @type {null | { id: string; projectId: string; scope: string; taskId?: string; threadId?: string; sessionId?: string; question: string; options?: Array<{id:string;label:string;description?:string}>; allowCustomResponse: boolean; requestedAt: string; provider?: string; source?: string }} */
+  let activePendingQuestion = null;  // Last clarifying question — survives renderer navigation
 
   function __setEventSender(sendEvent) {
     eventSender = sendEvent;
@@ -1705,6 +2112,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     activeRequestMeta = null;
     activeRequestOutput = "";
     activePendingApproval = null;
+    activePendingQuestion = null;
   }
 
   function isAgentCancelledError(error) {
@@ -1712,7 +2120,42 @@ function createProjectService({ app, settingsService, toolingService, p2pService
   }
 
   /**
-   * Write an approval or denial response to the active agent's stdin.
+   * Submit an answer to the active clarifying question. If the active provider
+   * supports stdin input (Copilot/Codex during a paused tool prompt), the
+   * answer is written there. Otherwise the call simply clears the pending
+   * slot — callers (UI) treat the answer as the next-turn user prompt.
+   * @param {{ id: string; answer: string; optionId?: string }} payload
+   */
+  function answerAgentQuestion(payload) {
+    const { id, answer, optionId } = payload || {};
+    if (!activePendingQuestion) {
+      return { success: false, error: "No pending question" };
+    }
+    if (id && activePendingQuestion.id !== id) {
+      return { success: false, error: "Question id mismatch" };
+    }
+    const question = activePendingQuestion;
+    const text = (answer ?? "").toString();
+    // Write to stdin when available (live paused process).
+    if (activeChildProcess && !activeChildProcess.killed && activeChildProcess.stdin && !activeChildProcess.stdin.destroyed && !activeChildProcess.stdin.writableEnded) {
+      try {
+        activeChildProcess.stdin.write(text + "\n");
+      } catch (e) {
+        // Non-fatal — UI will still treat the answer as next-turn input.
+        console.warn(`[answerAgentQuestion] stdin write failed: ${e.message}`);
+      }
+    }
+    activePendingQuestion = null;
+    emitAgentEvent("project:agentQuestionResolved", {
+      ...activeRequestMeta,
+      questionId: question.id,
+      answer: text,
+      optionId: optionId || null,
+    });
+    return { success: true };
+  }
+
+  /**
    * Used in manual approval mode when the user clicks Approve or Deny in the UI.
    * @param {boolean} approved — true to approve (writes "y\n"), false to deny (writes "n\n")
    */
@@ -1748,6 +2191,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     activeRequestMeta = null;
     activeRequestOutput = "";
     activePendingApproval = null;
+    activePendingQuestion = null;
 
     // Clean up git state if repo path is provided
     if (repoPath) {
@@ -1774,6 +2218,9 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       // Re-emit any pending approval so the renderer can restore the banner after navigation
       if (activePendingApproval) {
         setImmediate(() => emitAgentEvent("project:agentApprovalRequest", activePendingApproval));
+      }
+      if (activePendingQuestion) {
+        setImmediate(() => emitAgentEvent("project:agentQuestion", { ...activeRequestMeta, question: activePendingQuestion }));
       }
       return { ...activeRequestMeta, active: true, output: activeRequestOutput };
     }
@@ -2241,8 +2688,43 @@ function createProjectService({ app, settingsService, toolingService, p2pService
           plainStdout = textParts.join("\n");
         }
 
+        // Detect markdown-convention clarifying questions in the agent's final
+        // output (Claude can't pause via stdin; Copilot/Codex sometimes emit
+        // questions as plain markdown when they don't trigger a tool prompt).
+        let questionDetected = false;
+        try {
+          const detected = extractQuestionFromMarkdown(plainStdout);
+          if (detected && requestMeta) {
+            const scopeMap = {
+              "project-manager": "pm",
+              "task-agent": "task",
+              "solo-chat": "solo",
+            };
+            const scope = scopeMap[requestMeta.scope] || "task";
+            activePendingQuestion = {
+              id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              projectId: requestMeta.projectId || "",
+              scope,
+              taskId: requestMeta.taskId,
+              threadId: requestMeta.threadId,
+              sessionId: requestMeta.sessionId,
+              question: detected.question,
+              options: detected.options,
+              allowCustomResponse: detected.allowCustomResponse,
+              requestedAt: new Date().toISOString(),
+              provider: requestMeta.model,
+              source: "markdown",
+            };
+            questionDetected = true;
+            emitAgentEvent("project:agentQuestion", { ...requestMeta, question: activePendingQuestion });
+          }
+        } catch (e) {
+          console.warn(`[agentQuestion] markdown extract failed: ${e.message}`);
+        }
+
         activeRequestOutput = "";
         activePendingApproval = null;
+        if (!questionDetected) activePendingQuestion = null;
         emitAgentEvent("project:agentCompleted", {
           ...requestMeta,
           exitCode: code,
@@ -2281,6 +2763,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
           return;
         }
         activePendingApproval = null;
+        activePendingQuestion = null;
         emitAgentEvent("project:agentError", {
           ...requestMeta,
           message: err.message,
@@ -2485,6 +2968,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
   async function saveProject(nextProject) {
     console.log(`[saveProject] Saving project ${nextProject.id}, conversation: ${nextProject.dashboard?.conversation?.length ?? 'N/A'} messages`);
+    let savedSettings = null;
     await settingsService.atomicUpdate((settings) => {
       const existing = (settings.projects ?? []).find(p => p.id === nextProject.id);
       if (existing) {
@@ -2541,14 +3025,25 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       }
 
       const nextProjects = [mergedProject, ...(settings.projects ?? []).filter((project) => project.id !== mergedProject.id)];
-      return {
+      const updated = {
         ...settings,
         projects: nextProjects,
         activeProjectId: mergedProject.id,
         recentRepositories: Array.from(new Set([mergedProject.repoPath, ...(settings.recentRepositories ?? [])])).slice(0, 8),
         workspaceRoots: Array.from(new Set([mergedProject.repoPath, ...(settings.workspaceRoots ?? [])])).slice(0, 8),
       };
+      savedSettings = updated;
+      return updated;
     });
+
+    // Notify renderers that settings changed so the UI can re-render with the
+    // saved agent response immediately. Without this, plan-execution and
+    // freestyle responses don't render until the user navigates away and back.
+    try {
+      if (savedSettings && eventSender) {
+        eventSender("settings:changed", savedSettings);
+      }
+    } catch (_) { /* swallow */ }
 
     // Broadcast agent config snapshot to P2P peers (lightweight summary only)
     try {
@@ -3045,7 +3540,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     // Build CLI args based on active provider
     const selectedModel = typeof model === "string" && model.trim()
       ? model.trim()
-      : settings.projectDefaults?.copilotModel?.trim?.() || "";
+      : pickDefaultModel(settings);
 
     const provider = resolveProvider(settings, selectedModel);
 
@@ -3177,7 +3672,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     await fs.writeFile(path.join(project.repoPath, "README.md"), sections.join("\n"), "utf8");
   }
 
-  async function sendPMMessage({ projectId, prompt, model, attachedFiles = [], replaceFromMessageId }) {
+  async function sendPMMessage({ projectId, prompt, model, attachedFiles = [], replaceFromMessageId, mode: _mode }) {
     console.log(`[pm-chat] START project=${projectId.slice(0,8)} model=${model || "auto"} len=${prompt?.length}`);
     if (typeof prompt !== "string" || !prompt.trim()) {
       throw new Error("A message is required.");
@@ -3209,7 +3704,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     // Build CLI invocation based on active provider
     const selectedModel = typeof model === "string" && model.trim()
       ? model.trim()
-      : settings.projectDefaults?.copilotModel?.trim?.() || "";
+      : pickDefaultModel(settings);
 
     const provider = resolveProvider(settings, selectedModel);
 
@@ -3229,28 +3724,13 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
     const fullPrompt = [
       systemPromptMarkdown,
-      "You are the Project Manager for this CodeCollab project.",
-      "The project plan has already been created. Do NOT regenerate or modify the plan. Only answer the user's question or discuss the project. If the user explicitly asks you to change something, then explain what you would change but do not output JSON.",
-      "Keep responses brief, plain-language, and non-technical by default.",
-      "When helpful, structure the answer as: What happened, Recommended next step, Move to the next task when.",
-      "IMPORTANT: CodeCollab is a self-contained workspace. Never reference VS Code, external terminals, browsers, or any tool outside CodeCollab. All running, testing, and previewing uses CodeCollab's built-in Terminal tab and Preview tab.",
+      "## Project Context",
+      buildPlanModePromptContext(project),
       "",
-      "IMPORTANT — User Input Required:",
-      "If your response requires the user to provide anything (API keys, credentials, tokens, environment variables, configuration values, account sign-ups, or any other manual input), you MUST end your response with a clearly separated section:",
-      "",
-      "---",
-      "## Attention User Input Required",
-      "Then list each item the user needs to provide, explain what it is, and give clear steps on how to obtain it.",
-      "This section MUST ALWAYS be the very last thing in your response, with no other content after it.",
-      "If no user input is required, do not include this section at all.",
-      "",
-      RESPONSE_SUMMARY_INSTRUCTIONS,
-      "",
-      `Project name: ${project.name}`,
-      `Project description: ${project.description}`,
-      baseConversation.length > 0 ? `Recent conversation:\n${buildRecentConversationTranscript(baseConversation)}` : null,
-      nextAttachedFiles.length > 0 ? `Attached files from the user:\n${nextAttachedFiles.map((filePath) => `- ${filePath}`).join("\n")}` : null,
-      `Latest user message:\n${prompt.trim()}`,
+      baseConversation.length > 0 ? `## Recent Conversation\n${buildRecentConversationTranscript(baseConversation)}` : null,
+      nextAttachedFiles.length > 0 ? `## Attached Files\n${nextAttachedFiles.map((filePath) => `- ${filePath}`).join("\n")}` : null,
+      PLAN_MODE_INSTRUCTIONS,
+      `## User Request\n${prompt.trim()}`,
     ].filter(Boolean).join("\n\n");
 
     const rawOutput = await runProviderCli(commands, provider, fullPrompt, selectedModel, { agentMode: false }, project.repoPath, {
@@ -3287,16 +3767,55 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       provider,
     };
 
+    // Plan-mode: parse the response into a structured ProjectPlan and surface it.
+    let generatedPlan = null;
+    try {
+      generatedPlan = parsePlanMarkdown(responseText, {
+        projectId,
+        source: { kind: "pm-chat", chatId: `pm-${projectId}`, messageId: aiMessage.id },
+      });
+      if (generatedPlan?.steps?.length === 0) {
+        // Parser couldn't find any steps — keep the message but skip persisting an empty plan.
+        generatedPlan = null;
+      }
+    } catch (err) {
+      console.warn(`[pm-chat] plan-parse failed: ${err?.message || err}`);
+      generatedPlan = null;
+    }
+
+    if (generatedPlan) {
+      aiMessage.planId = generatedPlan.id;
+      aiMessage.planTitle = generatedPlan.title;
+    }
+
+    const existingPlans = Array.isArray(existingDashboard.plans) ? existingDashboard.plans : [];
+    const nextPlans = generatedPlan ? [...existingPlans, generatedPlan] : existingPlans;
+
     const nextProject = {
       ...project,
       updatedAt: formatProjectTimestamp(timestamp),
       dashboard: {
         ...existingDashboard,
         conversation: [...baseConversation, userMessage, aiMessage],
+        plans: nextPlans,
+        activePlanId: existingDashboard.activePlanId ?? null,
       },
     };
 
     const saved = await saveProject(await syncSharedAgentContextFiles(nextProject));
+
+    // Persist plan to .codebuddy/plans/{id}.json + broadcast to peers
+    if (generatedPlan) {
+      try {
+        await sharedStateService.savePlanV2(project.repoPath, generatedPlan);
+        broadcastStateToP2P(projectId, "plan-v2", generatedPlan.id, {
+          plan: generatedPlan,
+          projectId,
+        });
+      } catch (err) {
+        console.warn(`[pm-chat] plan persistence failed: ${err?.message || err}`);
+      }
+    }
 
     // Broadcast to P2P peers + save to shared state
     const pmConversationId = `pm-${projectId}`;
@@ -3320,7 +3839,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     return saved;
   }
 
-  async function sendSoloMessage({ projectId, sessionId, prompt, model, attachedFiles = [], replaceFromMessageId }) {
+  async function sendSoloMessage({ projectId, sessionId, prompt, model, attachedFiles = [], replaceFromMessageId, mode }) {
     console.log(`[solo-chat] START project=${projectId.slice(0,8)} session=${sessionId?.slice(0,8) || "new"} model=${model || "auto"} len=${prompt?.length}`);
     if (typeof prompt !== "string" || !prompt.trim()) {
       throw new Error("A message is required.");
@@ -3370,7 +3889,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     // Build CLI invocation based on active provider
     const selectedModel = typeof model === "string" && model.trim()
       ? model.trim()
-      : settings.projectDefaults?.copilotModel?.trim?.() || "";
+      : pickDefaultModel(settings);
 
     const provider = resolveProvider(settings, selectedModel);
 
@@ -3394,6 +3913,30 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       }
     );
 
+    // Detect plan-execution context: session was created by executePlanAction.
+    const planForExecution = session.planId
+      ? (existingDashboard.plans ?? []).find((p) => p && p.id === session.planId) || null
+      : null;
+    const planExecutionInstructions = planForExecution ? [
+      "=== PLAN EXECUTION MODE ===",
+      `You are executing the plan "${planForExecution.title}".`,
+      "Work through each step IN ORDER. After completing each step, emit a single line containing ONLY the marker:",
+      "  [PLAN-STEP-DONE: <stepId>]",
+      "Use the exact stepId shown in the list below. Do not paraphrase or skip the marker.",
+      "If you intentionally skip a step, emit [PLAN-STEP-SKIPPED: <stepId>] with a one-line reason.",
+      "When ALL steps are complete, emit [PLAN-COMPLETE] on its own line.",
+      "",
+      "Plan steps:",
+      ...planForExecution.steps.map((s, i) => `  ${i + 1}. id=${s.id} status=${s.status} — ${s.text}`),
+      "=== END PLAN EXECUTION MODE ===",
+    ].join("\n") : null;
+    const planExecutionSeedMessage = planForExecution
+      ? baseMessages.find((msg) => msg?.isExecutionSeed && msg?.planId === planForExecution.id && msg?.text === prompt.trim())
+      : null;
+    const promptHistoryMessages = planExecutionSeedMessage
+      ? baseMessages.filter((msg) => msg !== planExecutionSeedMessage)
+      : baseMessages;
+
     const fullPrompt = [
       "You are a coding assistant working directly with the user in their project.",
       "You have full access to read and write files, run commands, and build code.",
@@ -3408,6 +3951,8 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       "If a port is in use, suggest a different port — do NOT kill processes.",
       "=== END SAFETY RULES ===",
       "",
+      planExecutionInstructions,
+      "",
       "IMPORTANT — User Input Required:",
       "If your response requires the user to provide anything (API keys, credentials, tokens, environment variables, configuration values, account sign-ups, or any other manual input), you MUST end your response with a clearly separated section:",
       "",
@@ -3415,11 +3960,13 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       "## Attention User Input Required",
       "Then list each item, explain what it is, and give clear steps to obtain it.",
       "",
+      mode === "plan" ? PLAN_MODE_INSTRUCTIONS : null,
+      mode === "ask" ? ASK_MODE_INSTRUCTIONS : null,
       RESPONSE_SUMMARY_INSTRUCTIONS,
       "",
       `Project: ${project.name}`,
       `Description: ${project.description}`,
-      baseMessages.length > 0 ? `Recent conversation:\n${buildRecentConversationTranscript(baseMessages)}` : null,
+      promptHistoryMessages.length > 0 ? `Recent conversation:\n${buildRecentConversationTranscript(promptHistoryMessages)}` : null,
       nextAttachedFiles.length > 0 ? `Attached files:\n${nextAttachedFiles.map((f) => `- ${f}`).join("\n")}` : null,
       `User message:\n${prompt.trim()}`,
     ].filter(Boolean).join("\n\n");
@@ -3443,11 +3990,24 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       if (isAgentCancelledError(programError)) {
         throw programError;
       }
-      rawOutput = programError.stdout?.trim() || "";
+      // Recover any partial readable output from the failed run so the user
+      // (and the peer) still see what the agent produced before crashing.
+      const partial = (programError?.stdout?.trim() || activeRequestOutput?.trim() || "").trim();
+      rawOutput = partial;
       if (!rawOutput) throw programError;
+      console.warn(`[solo-chat] provider error recovered: "${programError?.message?.slice(0, 80)}" — saving ${rawOutput.length}b of partial output`);
     }
 
     const responseText = rawOutput.trim() || "No response returned.";
+
+    // Strip plan-execution markers from the user-visible response (they are
+    // parsed separately below to update plan step statuses).
+    const visibleResponseText = (responseText
+      .replace(/^\s*\[PLAN-STEP-DONE:[^\]]+\]\s*$/gm, "")
+      .replace(/^\s*\[PLAN-STEP-SKIPPED:[^\]]+\][^\n]*$/gm, "")
+      .replace(/^\s*\[PLAN-COMPLETE\]\s*$/gm, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()) || "No response returned.";
 
     const userMessage = {
       id: `solo-user-${timestamp}`,
@@ -3465,24 +4025,79 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       id: `solo-ai-${timestamp}`,
       from: "Coding Agent",
       initials: "✦",
-      text: responseText,
+      text: visibleResponseText,
       time: formatTimeShort(timestamp),
       isAI: true,
       modelId: selectedModel || "auto",
       provider,
     };
 
+    let generatedPlan = null;
+    if (mode === "plan" && !planForExecution) {
+      try {
+        generatedPlan = parsePlanMarkdown(visibleResponseText, {
+          projectId,
+          source: { kind: "solo-chat", chatId: `solo-${session.id}`, messageId: aiMessage.id },
+        });
+        if (generatedPlan?.steps?.length === 0) generatedPlan = null;
+      } catch (err) {
+        console.warn(`[solo-chat] plan-parse failed: ${err?.message || err}`);
+        generatedPlan = null;
+      }
+      if (generatedPlan) {
+        aiMessage.planId = generatedPlan.id;
+        aiMessage.planTitle = generatedPlan.title;
+      }
+    }
+
     const updatedSession = {
       ...session,
       title: isNewSession ? (prompt.trim().slice(0, 60) || "New Session") : session.title,
       updatedAt: formatProjectTimestamp(timestamp),
       lastModel: selectedModel || null,
-      messages: [...baseMessages, userMessage, aiMessage],
+      messages: planExecutionSeedMessage ? [...baseMessages, aiMessage] : [...baseMessages, userMessage, aiMessage],
     };
 
     const nextSessions = isNewSession
       ? [...existingSessions, updatedSession]
       : existingSessions.map((s) => s.id === updatedSession.id ? updatedSession : s);
+
+    // If this session is executing a plan, parse step-completion markers from
+    // the agent output and update the plan accordingly.
+    const existingPlans = Array.isArray(existingDashboard.plans) ? existingDashboard.plans : [];
+    let updatedPlans = generatedPlan ? [...existingPlans, generatedPlan] : existingPlans;
+    let planAfter = null;
+    if (planForExecution) {
+      const doneIds = new Set();
+      const skippedIds = new Set();
+      const doneRegex = /\[PLAN-STEP-DONE:\s*([^\]\s]+)\s*\]/g;
+      const skipRegex = /\[PLAN-STEP-SKIPPED:\s*([^\]\s]+)\s*\]/g;
+      const completeRegex = /\[PLAN-COMPLETE\]/;
+      let m;
+      while ((m = doneRegex.exec(responseText)) !== null) doneIds.add(m[1]);
+      while ((m = skipRegex.exec(responseText)) !== null) skippedIds.add(m[1]);
+      const planComplete = completeRegex.test(responseText);
+
+      const validIds = new Set(planForExecution.steps.map((s) => s.id));
+      const filteredDone = [...doneIds].filter((id) => validIds.has(id));
+      const filteredSkipped = [...skippedIds].filter((id) => validIds.has(id));
+
+      if (filteredDone.length > 0 || filteredSkipped.length > 0 || planComplete) {
+        const nextSteps = planForExecution.steps.map((s) => {
+          if (filteredDone.includes(s.id)) return { ...s, status: "done" };
+          if (filteredSkipped.includes(s.id)) return { ...s, status: "skipped" };
+          return s;
+        });
+        const allDone = nextSteps.every((s) => s.status === "done" || s.status === "skipped");
+        planAfter = {
+          ...planForExecution,
+          steps: nextSteps,
+          status: planComplete || allDone ? "completed" : planForExecution.status,
+          updatedAt: new Date().toISOString(),
+        };
+        updatedPlans = updatedPlans.map((p) => p && p.id === planAfter.id ? planAfter : p);
+      }
+    }
 
     const nextProject = {
       ...project,
@@ -3490,16 +4105,37 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       dashboard: {
         ...existingDashboard,
         soloSessions: nextSessions,
+        plans: updatedPlans,
       },
     };
 
     const saved = await saveProject(await syncSharedAgentContextFiles(nextProject));
+
+    if (generatedPlan) {
+      try {
+        await sharedStateService.savePlanV2(project.repoPath, generatedPlan);
+        broadcastStateToP2P(projectId, "plan-v2", generatedPlan.id, { plan: generatedPlan, projectId });
+      } catch (err) {
+        console.warn(`[solo-chat] plan persistence failed: ${err?.message || err}`);
+      }
+    }
+
+    // Persist plan update to shared state + broadcast to peers
+    if (planAfter) {
+      try {
+        await sharedStateService.savePlanV2(project.repoPath, planAfter);
+        broadcastStateToP2P(projectId, "plan-v2", planAfter.id, { plan: planAfter, projectId });
+      } catch (err) {
+        console.warn(`[solo-chat] plan persistence failed: ${err?.message || err}`);
+      }
+    }
 
     // Broadcast to P2P peers + save to shared state
     const soloConversationId = `solo-${updatedSession.id}`;
     broadcastMessageToP2P(projectId, soloConversationId, aiMessage, "solo-chat");
 
     // Broadcast full conversation update so peer agents share context
+    try { console.log(`[solo-chat] broadcasting conversation state-change sessionId=${updatedSession.id} newMessages=2`); } catch {}
     broadcastStateToP2P(projectId, "conversation", soloConversationId, {
       type: "solo-chat",
       projectId,
@@ -3533,7 +4169,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     return { project: saved, sessionId: updatedSession.id };
   }
 
-  async function sendTaskMessage({ projectId, taskId, threadId, prompt, model, attachedFiles = [], replaceFromMessageId, approvalMode: payloadApprovalMode }) {
+  async function sendTaskMessage({ projectId, taskId, threadId, prompt, model, attachedFiles = [], replaceFromMessageId, approvalMode: payloadApprovalMode, mode }) {
     console.log(`[task-agent] START project=${projectId.slice(0,8)} task=${taskId} model=${model || "auto"} len=${prompt?.length}`);
     if (typeof prompt !== "string" || !prompt.trim()) {
       throw new Error("A task message is required.");
@@ -3602,7 +4238,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       ? attachedFiles.filter((entry) => typeof entry === "string" && entry.trim()).map((entry) => entry.trim())
       : [];
     const checkpoint = await createCheckpointSnapshot(hydratedProject.repoPath, `Before task prompt: ${prompt.trim().slice(0, 80)}`, projectId);
-    const taskSystemPrompt = buildTaskAgentSystemPrompt(taskContext, latestThread);
+    const taskSystemPrompt = buildTaskAgentSystemPrompt(taskContext, latestThread, { mode });
 
     // Load shared agent context from peer machines (if available)
     const peerContext = await loadPeerAgentContext(hydratedProject.repoPath, "task", taskId);
@@ -3610,7 +4246,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     // Build CLI invocation based on active provider (agent mode — with tool use)
     const selectedModel = typeof model === "string" && model.trim()
       ? model.trim()
-      : settings.projectDefaults?.copilotModel?.trim?.() || "";
+      : pickDefaultModel(settings);
 
     const provider = resolveProvider(settings, selectedModel);
 
@@ -3737,6 +4373,24 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       provider,
     };
 
+    let generatedPlan = null;
+    if (mode === "plan") {
+      try {
+        generatedPlan = parsePlanMarkdown(responseText, {
+          projectId,
+          source: { kind: "task-chat", chatId: `task-${latestThread.id}`, messageId: agentMessage.id },
+        });
+        if (generatedPlan?.steps?.length === 0) generatedPlan = null;
+      } catch (err) {
+        console.warn(`[task-agent] plan-parse failed: ${err?.message || err}`);
+        generatedPlan = null;
+      }
+      if (generatedPlan) {
+        agentMessage.planId = generatedPlan.id;
+        agentMessage.planTitle = generatedPlan.title;
+      }
+    }
+
     const statusUpdate = updateTaskStatusInPlan(hydratedProject.dashboard.plan, taskId, taskStatus, timestamp);
 
     // === Targeted merge instead of full project overwrite ===
@@ -3775,6 +4429,10 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
         // 3. Add activity to the FRESH activity array
         const freshActivity = freshDashboard.activity ?? [];
+        const freshPlans = Array.isArray(freshDashboard.plans) ? [...freshDashboard.plans] : [];
+        if (generatedPlan) {
+          freshPlans.push(generatedPlan);
+        }
         const newActivity = [
           ...(freshStatusUpdate.changed ? [{
             id: `activity-task-status-${taskId}-${timestamp}`,
@@ -3805,6 +4463,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
             ...freshDashboard,
             plan: freshStatusUpdate.plan,
             taskThreads: freshThreads,
+            plans: freshPlans,
             activity: [...newActivity, ...freshActivity],
           },
         };
@@ -3832,6 +4491,15 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
       return mergedProject || hydratedProject;
     })();
+
+    if (generatedPlan) {
+      try {
+        await sharedStateService.savePlanV2(hydratedProject.repoPath, generatedPlan);
+        broadcastStateToP2P(projectId, "plan-v2", generatedPlan.id, { plan: generatedPlan, projectId });
+      } catch (err) {
+        console.warn(`[task-agent] plan persistence failed: ${err?.message || err}`);
+      }
+    }
 
     // Broadcast to P2P peers + save to shared state
     const taskConversationId = `task-${latestThread.id}`;
@@ -3914,7 +4582,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     const recentTranscript = activeThread?.messages?.length ? buildRecentConversationTranscript(activeThread.messages, 10) : "";
     const selectedModel = typeof model === "string" && model.trim()
       ? model.trim()
-      : settings.projectDefaults?.copilotModel?.trim?.() || "";
+      : pickDefaultModel(settings);
 
     const generationPrompt = [
       "You generate the next best user prompt for a CodeCollab task.",
@@ -4543,7 +5211,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     // NOTE: No agent mode (no tool use) — keeps the agent fast (text-only analysis)
     const selectedModel = typeof model === "string" && model.trim()
       ? model.trim()
-      : settings.projectDefaults?.copilotModel?.trim?.() || "";
+      : pickDefaultModel(settings);
 
     const provider = resolveProvider(settings, selectedModel);
 
@@ -4677,6 +5345,248 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     }
   }
 
+  // ─── Plans v2 ───────────────────────────────────────────────────────────
+
+  function getProjectOrThrow(settings, projectId) {
+    const project = (settings.projects ?? []).find((p) => p.id === projectId);
+    if (!project) throw new Error("Project not found.");
+    return project;
+  }
+
+  async function listPlansV2({ projectId }) {
+    const settings = await settingsService.readSettings();
+    const project = getProjectOrThrow(settings, projectId);
+    return Array.isArray(project.dashboard?.plans) ? project.dashboard.plans : [];
+  }
+
+  async function savePlanV2Action({ plan: rawPlan }) {
+    if (!rawPlan || !rawPlan.projectId) throw new Error("Plan must include a projectId.");
+    const normalized = normalizeProjectPlanV2(rawPlan, rawPlan.projectId);
+
+    await settingsService.atomicUpdate((fresh) => {
+      const idx = (fresh.projects ?? []).findIndex((p) => p.id === normalized.projectId);
+      if (idx < 0) return fresh;
+      const dashboard = fresh.projects[idx].dashboard ?? {};
+      const plans = Array.isArray(dashboard.plans) ? [...dashboard.plans] : [];
+      const existingIdx = plans.findIndex((p) => p && p.id === normalized.id);
+      if (existingIdx >= 0) plans[existingIdx] = normalized;
+      else plans.push(normalized);
+      fresh.projects[idx].dashboard = { ...dashboard, plans };
+      return { ...fresh };
+    });
+
+    const settings = await settingsService.readSettings();
+    const project = getProjectOrThrow(settings, normalized.projectId);
+    try {
+      await sharedStateService.savePlanV2(project.repoPath, normalized);
+    } catch (err) {
+      console.warn(`[plan-v2] save persistence failed: ${err?.message || err}`);
+    }
+    broadcastStateToP2P(normalized.projectId, "plan-v2", normalized.id, {
+      plan: normalized,
+      projectId: normalized.projectId,
+    });
+    return normalized;
+  }
+
+  async function deletePlanV2Action({ projectId, planId }) {
+    if (!projectId || !planId) throw new Error("projectId and planId are required.");
+    let removed = false;
+    await settingsService.atomicUpdate((fresh) => {
+      const idx = (fresh.projects ?? []).findIndex((p) => p.id === projectId);
+      if (idx < 0) return fresh;
+      const dashboard = fresh.projects[idx].dashboard ?? {};
+      const plans = Array.isArray(dashboard.plans) ? dashboard.plans.filter((p) => p && p.id !== planId) : [];
+      removed = (dashboard.plans?.length ?? 0) !== plans.length;
+      const activePlanId = dashboard.activePlanId === planId ? null : (dashboard.activePlanId ?? null);
+      fresh.projects[idx].dashboard = { ...dashboard, plans, activePlanId };
+      return { ...fresh };
+    });
+
+    const settings = await settingsService.readSettings();
+    const project = (settings.projects ?? []).find((p) => p.id === projectId);
+    if (project?.repoPath) {
+      try { await sharedStateService.deletePlanV2(project.repoPath, planId); }
+      catch (err) { console.warn(`[plan-v2] delete persistence failed: ${err?.message || err}`); }
+    }
+    broadcastStateToP2P(projectId, "plan-v2-deleted", planId, { projectId, planId });
+    return { deleted: removed };
+  }
+
+  async function setActivePlanAction({ projectId, planId }) {
+    if (!projectId) throw new Error("projectId is required.");
+    let nextActiveId = null;
+    await settingsService.atomicUpdate((fresh) => {
+      const idx = (fresh.projects ?? []).findIndex((p) => p.id === projectId);
+      if (idx < 0) return fresh;
+      const dashboard = fresh.projects[idx].dashboard ?? {};
+      const plans = Array.isArray(dashboard.plans) ? dashboard.plans : [];
+      if (planId && !plans.find((p) => p && p.id === planId)) {
+        nextActiveId = dashboard.activePlanId ?? null;
+        return fresh;
+      }
+      // Update statuses: previous active → "draft" (if it was "active"); new active → "active"
+      const updatedPlans = plans.map((p) => {
+        if (!p) return p;
+        if (p.id === planId) return { ...p, status: p.status === "executing" ? p.status : "active", updatedAt: new Date().toISOString() };
+        if (p.status === "active") return { ...p, status: "draft", updatedAt: new Date().toISOString() };
+        return p;
+      });
+      fresh.projects[idx].dashboard = { ...dashboard, plans: updatedPlans, activePlanId: planId || null };
+      nextActiveId = planId || null;
+      return { ...fresh };
+    });
+
+    const settings = await settingsService.readSettings();
+    const project = (settings.projects ?? []).find((p) => p.id === projectId);
+    if (project?.repoPath) {
+      try { await sharedStateService.writeActivePlanId(project.repoPath, nextActiveId); }
+      catch (err) { console.warn(`[plan-v2] active pointer persistence failed: ${err?.message || err}`); }
+    }
+    broadcastStateToP2P(projectId, "plan-v2-active", "active", { projectId, activePlanId: nextActiveId });
+    return { activePlanId: nextActiveId };
+  }
+
+  async function archivePlanAction({ projectId, planId }) {
+    if (!projectId || !planId) throw new Error("projectId and planId are required.");
+    let updated = null;
+    await settingsService.atomicUpdate((fresh) => {
+      const idx = (fresh.projects ?? []).findIndex((p) => p.id === projectId);
+      if (idx < 0) return fresh;
+      const dashboard = fresh.projects[idx].dashboard ?? {};
+      const plans = Array.isArray(dashboard.plans) ? [...dashboard.plans] : [];
+      const target = plans.findIndex((p) => p && p.id === planId);
+      if (target < 0) return fresh;
+      plans[target] = { ...plans[target], status: "archived", updatedAt: new Date().toISOString() };
+      updated = plans[target];
+      const activePlanId = dashboard.activePlanId === planId ? null : (dashboard.activePlanId ?? null);
+      fresh.projects[idx].dashboard = { ...dashboard, plans, activePlanId };
+      return { ...fresh };
+    });
+    const settings = await settingsService.readSettings();
+    const project = (settings.projects ?? []).find((p) => p.id === projectId);
+    if (project?.repoPath && updated) {
+      try { await sharedStateService.savePlanV2(project.repoPath, updated); }
+      catch (err) { console.warn(`[plan-v2] archive persistence failed: ${err?.message || err}`); }
+    }
+    if (updated) broadcastStateToP2P(projectId, "plan-v2", updated.id, { plan: updated, projectId });
+    return updated;
+  }
+
+  async function executePlanAction({ projectId, planId, model }) {
+    if (!projectId || !planId) throw new Error("projectId and planId are required.");
+
+    const settings = await settingsService.readSettings();
+    const project = getProjectOrThrow(settings, projectId);
+    const plan = (project.dashboard?.plans ?? []).find((p) => p && p.id === planId);
+    if (!plan) throw new Error("Plan not found.");
+
+    // Create a seeded solo session that will host the agent execution.
+    const timestamp = Date.now();
+    const sessionId = `solo-exec-${plan.id}-${timestamp.toString(36)}`;
+    const seedText = [
+      `# Executing plan: ${plan.title}`,
+      "",
+      plan.tldr ? `**TL;DR:** ${plan.tldr}` : null,
+      "",
+      "## Steps",
+      ...plan.steps.map((step, idx) => `${idx + 1}. ${step.text}`),
+      plan.relevantFiles.length > 0 ? "\n## Relevant files" : null,
+      ...plan.relevantFiles.map((f) => `- ${f.path}${f.note ? ` — ${f.note}` : ""}`),
+      plan.verification.length > 0 ? "\n## Verification" : null,
+      ...plan.verification.map((v) => `- ${v}`),
+      "",
+      "Begin by acknowledging the plan, then execute it step by step.",
+    ].filter((line) => line !== null).join("\n");
+
+    const seededMessage = {
+      id: `solo-seed-${timestamp}`,
+      from: project.creatorName || "You",
+      initials: "YO",
+      text: seedText,
+      time: formatTimeShort(timestamp),
+      isMine: true,
+      modelId: typeof model === "string" ? model : "auto",
+      planId: plan.id,
+      isExecutionSeed: true,
+    };
+
+    // Create a seeded session record so the UI can navigate to it and show the
+    // submitted plan prompt immediately while the fire-and-forget agent starts.
+    await settingsService.atomicUpdate((fresh) => {
+      const idx = (fresh.projects ?? []).findIndex((p) => p.id === projectId);
+      if (idx < 0) return fresh;
+      const dashboard = fresh.projects[idx].dashboard ?? {};
+      const sessions = Array.isArray(dashboard.soloSessions) ? [...dashboard.soloSessions] : [];
+      sessions.unshift({
+        id: sessionId,
+        title: `Execute: ${plan.title}`.slice(0, 80),
+        createdAt: formatProjectTimestamp(timestamp),
+        updatedAt: formatProjectTimestamp(timestamp),
+        lastModel: typeof model === "string" ? model : null,
+        messages: [seededMessage],
+        planId: plan.id,
+      });
+      const plans = Array.isArray(dashboard.plans) ? [...dashboard.plans] : [];
+      const planIdx = plans.findIndex((p) => p && p.id === plan.id);
+      if (planIdx >= 0) {
+        plans[planIdx] = {
+          ...plans[planIdx],
+          status: "executing",
+          executionChatId: sessionId,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      fresh.projects[idx].dashboard = { ...dashboard, soloSessions: sessions, plans };
+      return { ...fresh };
+    });
+
+    // Broadcast the new solo session + updated plan to peers immediately so
+    // the invited machine can show "Go to live agent" and bind incoming tokens
+    // to this session id without waiting for the final state-sync.
+    try {
+      const fresh = await settingsService.readSettings();
+      const proj = (fresh.projects ?? []).find((p) => p.id === projectId);
+      const newSession = (proj?.dashboard?.soloSessions ?? []).find((s) => s.id === sessionId);
+      const updatedPlan = (proj?.dashboard?.plans ?? []).find((p) => p && p.id === plan.id);
+      const payload = {};
+      if (newSession) payload.soloSessions = [newSession];
+      if (updatedPlan) payload.plans = [updatedPlan];
+      if (Object.keys(payload).length > 0) {
+        broadcastStateToP2P(projectId, "thread-sync", `exec-${sessionId}`, payload);
+        if (updatedPlan) broadcastStateToP2P(projectId, "plan-v2", updatedPlan.id, { plan: updatedPlan, projectId });
+      }
+    } catch (err) {
+      console.warn(`[executePlan] peer-sync broadcast failed: ${err?.message || err}`);
+    }
+
+    // Fire-and-forget: kick off the agent so the UI can navigate immediately.
+    // Errors surface through the regular agent event stream and conversation.
+    setImmediate(() => {
+      sendSoloMessage({
+        projectId,
+        sessionId,
+        prompt: seedText,
+        model: typeof model === "string" ? model : undefined,
+      }).catch((err) => {
+        console.error(`[executePlan] sendSoloMessage failed: ${err?.message || err}`);
+      });
+    });
+
+    return { chatId: sessionId, planId: plan.id };
+  }
+
+  async function savePlanFromChatMessageAction({ projectId, markdown, source, title }) {
+    if (!projectId || typeof markdown !== "string") throw new Error("projectId and markdown are required.");
+    const parsed = parsePlanMarkdown(markdown, { projectId, source: source || { kind: "manual" }, title });
+    if (parsed.steps.length === 0) {
+      // Still save — flat plans without explicit steps are allowed; tldr/decisions may carry the value.
+      // But ensure at least the title or tldr is present.
+      if (!parsed.tldr && !parsed.title) throw new Error("Could not extract a plan from this message.");
+    }
+    return savePlanV2Action({ plan: parsed });
+  }
+
   return {
     __setEventSender,
     listProjects,
@@ -4693,6 +5603,8 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     cancelActiveRequest,
     sendToolApproval,
     getPendingApproval: () => activePendingApproval,
+    answerAgentQuestion,
+    getPendingQuestion: () => activePendingQuestion,
     forceResetAgent,
     getActiveRequest,
     ensureGithubRepoForProject,
@@ -4701,6 +5613,13 @@ function createProjectService({ app, settingsService, toolingService, p2pService
     getFallbackProjectRoot,
     listRepoCollaborators,
     setRepoVisibility,
+    listPlansV2,
+    savePlanV2: savePlanV2Action,
+    deletePlanV2: deletePlanV2Action,
+    setActivePlan: setActivePlanAction,
+    archivePlan: archivePlanAction,
+    executePlan: executePlanAction,
+    savePlanFromChatMessage: savePlanFromChatMessageAction,
   };
 }
 

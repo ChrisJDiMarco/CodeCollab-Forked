@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 
 import { useActiveDesktopProject } from "@/hooks/use-active-desktop-project";
@@ -10,7 +11,10 @@ import RunSummaryCard from "@/components/run-summary-card";
 import PromptCard from "@/components/prompt-card";
 import { nowTimestamp } from "@/lib/format-time";
 import { useStreamEvents } from "@/hooks/use-stream-events";
+import { QuestionCard } from "@/components/question-card";
+import type { AgentQuestion, ChatMode } from "@/lib/electron";
 import { buildPickerRows, effortLabel } from "@/lib/model-picker";
+import ProjectPreviewPage from "@/app/project/preview/page";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
@@ -66,6 +70,22 @@ function TerminalIcon({ className }: { className?: string }) {
   );
 }
 
+function PreviewIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className}>
+      <path d="M10 3.25A8.25 8.25 0 1018.25 11.5 8.25 8.25 0 0010 3.25zm0 1.5c.83 0 1.74 1.23 2.17 3H7.83c.43-1.77 1.34-3 2.17-3zM4.75 11.5c0-.78.17-1.52.47-2.18h2.34A15.78 15.78 0 007.5 11.5c0 .74.05 1.47.16 2.18H5.22a6.7 6.7 0 01-.47-2.18zm1.47 3.68h1.76c.24.77.56 1.44.94 1.96a6.8 6.8 0 01-2.7-1.96zm1.47-3.68c0-.77.06-1.5.17-2.18h4.28c.11.68.17 1.41.17 2.18s-.06 1.5-.17 2.18H7.86a14.2 14.2 0 01-.17-2.18zm2.31 6.75c-.83 0-1.74-1.23-2.17-3h4.34c-.43 1.77-1.34 3-2.17 3zm1.08-1.11c.38-.52.7-1.19.94-1.96h1.76a6.8 6.8 0 01-2.7 1.96zm3.7-3.46h-2.44c.11-.71.16-1.44.16-2.18 0-.74-.05-1.47-.16-2.18h2.44c.3.66.47 1.4.47 2.18s-.17 1.52-.47 2.18zm-.99-5.93h-1.77a8.56 8.56 0 00-.94-1.96 6.8 6.8 0 012.71 1.96z" />
+    </svg>
+  );
+}
+
+function ResetIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className}>
+      <path fillRule="evenodd" d="M4.5 4.75a.75.75 0 01.75.75v1.33A6.5 6.5 0 1110 17a.75.75 0 010-1.5 5 5 0 10-4.12-7.83h1.87a.75.75 0 010 1.5h-3.5a.75.75 0 01-.75-.75V5.5a.75.75 0 01.75-.75z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
@@ -75,6 +95,7 @@ interface SoloSession {
   createdAt: string;
   updatedAt: string;
   lastModel: string | null;
+  planId?: string;
   messages: Array<{
     id: string;
     from: string;
@@ -86,6 +107,8 @@ interface SoloSession {
     attachments?: string[];
     modelId?: string;
     checkpointId?: string | null;
+    planId?: string;
+    planTitle?: string;
   }>;
 }
 
@@ -144,8 +167,18 @@ function formatSessionTime(iso: string): string {
 /*  Page                                                               */
 /* ------------------------------------------------------------------ */
 export default function SoloChatPage() {
+  return (
+    <Suspense fallback={null}>
+      <SoloChatPageContent />
+    </Suspense>
+  );
+}
+
+function SoloChatPageContent() {
   const { activeProject } = useActiveDesktopProject();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const requestedSessionId = searchParams.get("session");
 
   /* --- state --- */
   const [sessions, setSessions] = useState<SoloSession[]>([]);
@@ -172,7 +205,7 @@ export default function SoloChatPage() {
   const [providerTab, setProviderTab] = useState<"claude" | "copilot" | "codex">("copilot");
 
   // Right panel
-  const [rightPanel, setRightPanel] = useState<"files" | "terminal" | "changes" | null>(null);
+  const [rightPanel, setRightPanel] = useState<"files" | "terminal" | "changes" | "preview" | null>(null);
   const [rightPanelWidth, setRightPanelWidth] = useState(420);
   const [fileTree, setFileTree] = useState<FileTreeEntry[]>([]);
   const [fileTreePath, setFileTreePath] = useState<string[]>([]);
@@ -216,7 +249,7 @@ export default function SoloChatPage() {
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); };
 
   // Chat mode
-  const [chatMode, setChatMode] = useState<"agent" | "ask" | "plan">("agent");
+  const [chatMode, setChatMode] = useState<ChatMode>("agent");
 
   // Diff view state
   const [diffFile, setDiffFile] = useState<string | null>(null);
@@ -293,16 +326,41 @@ export default function SoloChatPage() {
     [sessions, activeSessionId]
   );
 
+  /* --- plan-execution context for the active session --- */
+  const activePlan = useMemo(() => {
+    if (!activeSession?.planId || !activeProject) return null;
+    const dash = activeProject.dashboard as { plans?: unknown[] } | undefined;
+    const plans = Array.isArray(dash?.plans) ? dash.plans : [];
+    return (plans as Array<{ id: string; title: string; steps: Array<{ id: string; text: string; status: string }>; status: string }>)
+      .find((p) => p && p.id === activeSession.planId) ?? null;
+  }, [activeSession?.planId, activeProject]);
+
   /* --- sync sessions from project state --- */
   useEffect(() => {
     if (!activeProject) return;
-    // Skip session sync while generating to avoid duplicate messages:
-    // The streaming indicator renders live output, and the backend save would
-    // also add the response to the session, causing double-render.
-    if (isGenerating) return;
     const dash = activeProject.dashboard as Record<string, unknown>;
     const stored = Array.isArray(dash?.soloSessions) ? (dash.soloSessions as SoloSession[]) : [];
+    try {
+      const last = stored[stored.length - 1];
+      const lastMsg = last?.messages?.[last.messages.length - 1];
+      console.log(`[freestyle] settings sync soloSessions=${stored.length} lastSession=${last?.id ?? "-"} msgs=${last?.messages?.length ?? 0} lastMsg=${lastMsg?.id ?? "-"}:${lastMsg?.text?.slice(0, 24) ?? ""}`);
+    } catch { /* ignore */ }
     setSessions(stored);
+    // If a specific session was requested via ?session=, open it. If the session
+    // hasn't been synced from the peer yet, still set the active id so peer-stream
+    // tokens that target this id render inline (not as a sidebar banner).
+    if (requestedSessionId) {
+      const requested = stored.find((s) => s.id === requestedSessionId);
+      if (requested) {
+        setOpenTabIds((prev) => (prev.includes(requested.id) ? prev : [...prev, requested.id]));
+        setActiveSessionId(requested.id);
+        return;
+      }
+      // No local copy yet — open as a placeholder so peer stream binds to it.
+      setOpenTabIds((prev) => (prev.includes(requestedSessionId) ? prev : [...prev, requestedSessionId]));
+      setActiveSessionId(requestedSessionId);
+      return;
+    }
     // If we have stored sessions but no open tabs, open the latest one
     if (stored.length > 0 && openTabIds.length === 0) {
       const latestId = stored[stored.length - 1].id;
@@ -310,7 +368,7 @@ export default function SoloChatPage() {
       setActiveSessionId(latestId);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProject?.dashboard, isGenerating]);
+  }, [activeProject?.dashboard, isGenerating, requestedSessionId]);
 
   /* --- load featureFlags & model catalogs: settings.get() first (instant), then listStatus in background --- */
   useEffect(() => {
@@ -386,13 +444,18 @@ export default function SoloChatPage() {
   /* --- streaming listener via useStreamEvents --- */
   useEffect(() => {
     if (!window.electronAPI?.project) return;
+    const stopStarted = window.electronAPI.project.onAgentStarted?.((event) => {
+      if (event.scope !== "solo-chat") return;
+      setIsGenerating(true);
+      liveStartStreaming();
+    });
     const stopOutput = window.electronAPI.project.onAgentOutput((event) => {
       if (event.scope !== "solo-chat") return;
       const chunk = event.chunk ?? "";
       if (chunk) liveProcessChunk(chunk);
     });
-    return () => { stopOutput(); };
-  }, [liveProcessChunk]);
+    return () => { stopStarted?.(); stopOutput(); };
+  }, [liveProcessChunk, liveStartStreaming]);
 
   /* --- P2P Peer Activity State --- */
   const [peerStreams, setPeerStreams] = useState<Record<string, { peerName: string; conversationId: string; scope: string; tokens: string; updatedAt: number; taskId?: string | null; taskName?: string | null; sessionId?: string | null; sessionTitle?: string | null }>>({});
@@ -401,11 +464,17 @@ export default function SoloChatPage() {
   const inputBlocked = isGenerating || peerIsActive || Boolean(otherAgentActive);
 
   /* --- P2P Peer stream listeners --- */
+  const activeProjectIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => { activeProjectIdRef.current = activeProject?.id; }, [activeProject?.id]);
+  const peerStreamsRef = useRef(peerStreams);
+  useEffect(() => { peerStreamsRef.current = peerStreams; }, [peerStreams]);
+
   useEffect(() => {
     if (!window.electronAPI?.p2p) return;
 
     const stopChatToken = window.electronAPI.p2p.onChatToken((event: { projectId?: string; peerId?: string; peerName?: string; conversationId?: string; token?: string; scope?: string; taskId?: string; taskName?: string; sessionId?: string; sessionTitle?: string }) => {
-      if (event.projectId && event.projectId !== activeProject?.id) return;
+      const currentId = activeProjectIdRef.current;
+      if (event.projectId && currentId && event.projectId !== currentId) return;
       const peerId = event.peerId || "unknown";
       setPeerStreams((prev) => {
         const existing = prev[peerId];
@@ -415,7 +484,7 @@ export default function SoloChatPage() {
             peerName: event.peerName || "Peer",
             conversationId: event.conversationId || "unknown",
             scope: event.scope || "unknown",
-            tokens: ((existing?.tokens || "") + (event.token || "")).slice(-4000),
+            tokens: ((existing?.tokens || "") + (event.token || "")).slice(-20000),
             updatedAt: Date.now(),
             taskId: event.taskId || existing?.taskId || null,
             taskName: event.taskName || existing?.taskName || null,
@@ -431,14 +500,78 @@ export default function SoloChatPage() {
       }, 30000);
     });
 
-    const stopChatMessage = window.electronAPI.p2p.onChatMessage((event: { projectId?: string; peerId?: string }) => {
-      if (event.projectId && event.projectId !== activeProject?.id) return;
+    const stopChatMessage = window.electronAPI.p2p.onChatMessage((event: { projectId?: string; peerId?: string; conversationId?: string; message?: { id?: string; from?: string; text?: string; isAI?: boolean; isMine?: boolean; time?: string }; scope?: string }) => {
+      const currentId = activeProjectIdRef.current;
+      if (event.projectId && currentId && event.projectId !== currentId) return;
       const peerId = event.peerId || "unknown";
-      setPeerStreams((prev) => { const next = { ...prev }; delete next[peerId]; return next; });
+      // Direct fallback merge: when a peer's solo-chat agent finishes, the
+      // broadcaster sends both a `chat-message` (final AI message) and a
+      // `state-change` for the conversation. The state-change merges into
+      // settings via the main process, but if it's dropped (network coalesce,
+      // stuck reconnect, etc.) the peer would never see the saved message.
+      // Append directly to local sessions so the response renders no matter what.
+      try {
+        const scope = typeof event.scope === "string" ? event.scope : "";
+        const msg = event.message;
+        if (scope === "solo-chat" && msg && typeof msg.text === "string" && msg.text.length > 0) {
+          // Resolve sessionId: prefer the bound peer-stream id, else parse from
+          // conversationId (broadcaster sends `solo-${sessionId}`).
+          const peerSessionId = peerStreamsRef.current[peerId]?.sessionId || null;
+          const conv = typeof event.conversationId === "string" ? event.conversationId : "";
+          const derivedFromConv = conv.startsWith("solo-") ? conv.slice(5) : "";
+          const sessionId = peerSessionId || derivedFromConv;
+          if (sessionId) {
+            const incoming = {
+              id: msg.id || `peer-${Date.now()}`,
+              from: msg.from || "Agent",
+              initials: (msg.from || "AI").slice(0, 2).toUpperCase(),
+              text: msg.text,
+              isAI: msg.isAI ?? true,
+              isMine: msg.isMine ?? false,
+              time: msg.time || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            };
+            setSessions((prev) => {
+              const idx = prev.findIndex((s) => s.id === sessionId);
+              if (idx < 0) {
+                console.log(`[freestyle] chat-message fallback: creating placeholder session ${sessionId}`);
+                return [
+                  ...prev,
+                  {
+                    id: sessionId,
+                    title: peerStreamsRef.current[peerId]?.sessionTitle || "Peer session",
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    lastModel: null,
+                    messages: [incoming],
+                  } as SoloSession,
+                ];
+              }
+              const existing = prev[idx];
+              if (existing.messages.some((m) => m.id === incoming.id)) return prev;
+              const next = [...prev];
+              next[idx] = { ...existing, messages: [...existing.messages, incoming], updatedAt: new Date().toISOString() };
+              console.log(`[freestyle] chat-message fallback: appended msg id=${incoming.id} to session ${sessionId} (now ${next[idx].messages.length})`);
+              return next;
+            });
+          } else {
+            console.log(`[freestyle] chat-message fallback: no sessionId resolvable (peerStream=${peerSessionId}, conv=${conv})`);
+          }
+        }
+      } catch (err) {
+        console.warn("[freestyle] chat-message fallback error:", err);
+      }
+      // Keep the timeline visible for a few seconds after the message arrives so
+      // users can review what the peer's agent did, especially for fast runs.
+      if (peerStreamTimeoutsRef.current[peerId]) clearTimeout(peerStreamTimeoutsRef.current[peerId]);
+      peerStreamTimeoutsRef.current[peerId] = setTimeout(() => {
+        setPeerStreams((prev) => { const next = { ...prev }; delete next[peerId]; return next; });
+        delete peerStreamTimeoutsRef.current[peerId];
+      }, 8000);
     });
 
     const stopPeerLeft = window.electronAPI.p2p.onPeerLeft((event: { projectId?: string; peerId?: string }) => {
-      if (event.projectId && event.projectId !== activeProject?.id) return;
+      const currentId = activeProjectIdRef.current;
+      if (event.projectId && currentId && event.projectId !== currentId) return;
       const peerId = event.peerId || "unknown";
       setPeerStreams((prev) => {
         if (!prev[peerId]) return prev;
@@ -450,9 +583,11 @@ export default function SoloChatPage() {
     });
 
     // Restore accumulated peer streams from main process (for reconnect after navigation)
+    // Note: This runs on mount only — see the dedicated effect below that re-runs
+    // when activeProject?.id resolves so we don't miss the initial restore.
     (async () => {
       try {
-        const streams = await window.electronAPI?.p2p?.getActivePeerStreams?.({ projectId: activeProject?.id });
+        const streams = await window.electronAPI?.p2p?.getActivePeerStreams?.({ projectId: activeProjectIdRef.current });
         if (streams && Object.keys(streams).length > 0) {
           setPeerStreams((prev: Record<string, { peerName: string; conversationId: string; scope: string; tokens: string; updatedAt: number; taskId?: string | null; taskName?: string | null; sessionId?: string | null; sessionTitle?: string | null }>) => {
             const merged = { ...prev };
@@ -474,8 +609,46 @@ export default function SoloChatPage() {
     };
   }, [activeProject?.id, liveProcessChunk, liveStartStreaming]);
 
+  /* --- Re-restore peer streams once the active project id resolves, so the
+         peer doesn't miss the in-flight stream when the page mounts before
+         the project context loads. */
+  useEffect(() => {
+    if (!activeProject?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const streams = await window.electronAPI?.p2p?.getActivePeerStreams?.({ projectId: activeProject.id });
+        if (cancelled || !streams || Object.keys(streams).length === 0) return;
+        setPeerStreams((prev) => {
+          const merged = { ...prev };
+          for (const [peerId, acc] of Object.entries(streams) as [string, { peerName: string; conversationId: string; scope: string; tokens: string; updatedAt: number; taskId?: string | null; taskName?: string | null; sessionId?: string | null; sessionTitle?: string | null }][]) {
+            if (!merged[peerId]) merged[peerId] = { ...acc };
+          }
+          return merged;
+        });
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [activeProject?.id]);
+
+  /* --- Auto-bind to a peer's active solo-chat session when the user has no
+         session selected. Lets the invited machine see live output as soon as
+         the peer's agent starts streaming, even without clicking a plan link. */
+  useEffect(() => {
+    if (activeSessionId || requestedSessionId) return;
+    const peerSoloStream = Object.values(peerStreams).find(
+      (s) => s.scope === "solo-chat" && typeof s.sessionId === "string" && s.sessionId,
+    );
+    if (peerSoloStream?.sessionId) {
+      const sid = peerSoloStream.sessionId;
+      setOpenTabIds((prev) => (prev.includes(sid) ? prev : [...prev, sid]));
+      setActiveSessionId(sid);
+    }
+  }, [peerStreams, activeSessionId, requestedSessionId]);
+
   /* --- Reconnect to active solo-chat on mount, or detect other-scope agent --- */
   useEffect(() => {
+    if (!activeProject) return;
     let cancelled = false;
     (async () => {
       try {
@@ -484,10 +657,19 @@ export default function SoloChatPage() {
           setOtherAgentActive(null);
           return;
         }
+        if (req.projectId && req.projectId !== activeProject.id) {
+          setOtherAgentActive(null);
+          return;
+        }
         if (req.scope === "solo-chat") {
+          if (requestedSessionId && req.sessionId && req.sessionId !== requestedSessionId) {
+            setOtherAgentActive({ scope: req.scope, taskName: req.sessionTitle });
+            return;
+          }
           setIsGenerating(true);
           setOtherAgentActive(null);
-          if (req.output) { liveStartStreaming(); liveProcessChunk(req.output); }
+          liveStartStreaming();
+          if (req.output) { liveProcessChunk(req.output); }
         } else {
           // Another agent (task or PM) is running — block freestyle input
           setOtherAgentActive({ scope: req.scope, taskName: req.taskName });
@@ -495,23 +677,103 @@ export default function SoloChatPage() {
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
-  }, [liveProcessChunk, liveStartStreaming]);
+  }, [activeProject, requestedSessionId, liveProcessChunk, liveStartStreaming]);
 
   /* --- Listen for agent completion to clear otherAgentActive blocking --- */
   useEffect(() => {
     if (!window.electronAPI?.project) return;
-    const clearOtherAgent = () => {
+    const handleCompleted = (event: { scope?: string }) => {
       setOtherAgentActive(null);
+      // For solo-chat events, finalize the live stream so the saved aiMessage
+      // can render in place of the live indicator. The handleSend path also
+      // does this in its finally block, but plan-execution kicks off the
+      // agent via setImmediate (no local await), so this listener is the
+      // only thing that clears state for that flow.
+      if (event?.scope === "solo-chat") {
+        // Always reset isGenerating + live events, even if liveFinalize throws,
+        // so the saved final message renders without requiring a navigation.
+        const reset = () => {
+          setIsGenerating(false);
+          liveResetEvents();
+        };
+        Promise.resolve(liveFinalize())
+          .catch(() => undefined)
+          .finally(() => {
+            setTimeout(reset, 300);
+          });
+        // Fallback: if the finalize promise stalls, force-reset after 1.5s.
+        setTimeout(() => {
+          setIsGenerating((prev) => (prev ? false : prev));
+        }, 1500);
+        // Defensive: pull the latest settings directly so the saved final
+        // message + plan progress show up even if the settings:changed broadcast
+        // is dropped or coalesced away. Without this the user could end up
+        // having to navigate away and back to see the agent's response.
+        (async () => {
+          try {
+            const fresh = await window.electronAPI?.settings?.get?.();
+            const project = fresh?.projects?.find((p) => p.id === fresh.activeProjectId);
+            const stored = Array.isArray(project?.dashboard?.soloSessions) ? project.dashboard.soloSessions : [];
+            if (stored.length > 0) setSessions(stored as SoloSession[]);
+          } catch { /* ignore */ }
+        })();
+      } else {
+        // Non-solo scopes — just make sure we don't stay in a stuck generating
+        // state if a stray event leaks through.
+        setIsGenerating((prev) => (prev ? false : prev));
+      }
     };
-    const stopCompleted = window.electronAPI.project.onAgentCompleted?.(clearOtherAgent);
-    const stopError = window.electronAPI.project.onAgentError?.(clearOtherAgent);
-    const stopCancelled = window.electronAPI.project.onAgentCancelled?.(clearOtherAgent);
+    const stopCompleted = window.electronAPI.project.onAgentCompleted?.(handleCompleted);
+    const stopError = window.electronAPI.project.onAgentError?.(handleCompleted);
+    const stopCancelled = window.electronAPI.project.onAgentCancelled?.(handleCompleted);
     return () => {
       stopCompleted?.();
       stopError?.();
       stopCancelled?.();
     };
-  }, []);
+  }, [liveFinalize, liveResetEvents]);
+
+  /* --- Solo chat: pending tool approvals + clarifying questions --- */
+  const [pendingApproval, setPendingApproval] = useState<{ toolName: string; toolInput: Record<string, unknown> } | null>(null);
+  const [pendingQuestion, setPendingQuestion] = useState<AgentQuestion | null>(null);
+  useEffect(() => {
+    if (!window.electronAPI?.project) return;
+    if (!activeProject) return;
+    const projectId = activeProject.id;
+    const stopApproval = window.electronAPI.project.onAgentApprovalRequest?.((event) => {
+      if (event.scope && event.scope !== "solo-chat") return;
+      if (event.projectId && event.projectId !== projectId) return;
+      setPendingApproval({ toolName: event.toolName, toolInput: event.toolInput });
+    });
+    const stopQuestion = window.electronAPI.project.onAgentQuestion?.((event) => {
+      if (event.question.scope !== "solo") return;
+      if (event.projectId && event.projectId !== projectId) return;
+      setPendingQuestion(event.question);
+    });
+    const stopResolved = window.electronAPI.project.onAgentQuestionResolved?.((event) => {
+      setPendingQuestion((prev) => (prev && prev.id === event.questionId ? null : prev));
+    });
+    // Reconcile on mount
+    void (async () => {
+      try {
+        const a = await window.electronAPI?.project?.getPendingApproval?.();
+        if (a && (!a.projectId || a.projectId === projectId) && (!a.scope || a.scope === "solo-chat")) {
+          setPendingApproval({ toolName: a.toolName, toolInput: a.toolInput });
+        }
+      } catch { /* ignore */ }
+      try {
+        const q = await window.electronAPI?.project?.getPendingQuestion?.();
+        if (q && q.scope === "solo" && (!q.projectId || q.projectId === projectId)) {
+          setPendingQuestion(q);
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => {
+      stopApproval?.();
+      stopQuestion?.();
+      stopResolved?.();
+    };
+  }, [activeProject]);
 
   /* --- model menu dismiss on click outside --- */
   useEffect(() => {
@@ -828,6 +1090,7 @@ export default function SoloChatPage() {
           sessionId: sid,
           prompt: fullPrompt,
           model: selectedModel !== "auto" ? selectedModel : undefined,
+          mode: chatMode,
         });
       }
     } catch (err) {
@@ -864,6 +1127,27 @@ export default function SoloChatPage() {
     } finally {
       setIsCompacting(false);
     }
+  };
+
+  const handleForceReset = async () => {
+    if (!activeProject?.repoPath) return;
+    try {
+      await window.electronAPI?.project?.forceResetAgent?.({ repoPath: activeProject.repoPath });
+      showToast("Agent force reset");
+    } catch {
+      showToast("Force reset failed");
+    }
+    setIsGenerating(false);
+    setOtherAgentActive(null);
+    setPendingApproval(null);
+    setPendingQuestion(null);
+    setPeerStreams({});
+    liveResetEvents();
+  };
+
+  const handleOpenPreview = () => {
+    setRightPanel("preview");
+    setRightPanelWidth((current) => Math.max(current, 520));
   };
 
   const handleOpenInVSCode = async () => {
@@ -1027,6 +1311,14 @@ export default function SoloChatPage() {
           </button>
           <button
             type="button"
+            onClick={() => { setRightPanel(rightPanel === "preview" ? null : "preview"); setRightPanelWidth((current) => Math.max(current, 520)); }}
+            title="Live preview"
+            className={`flex h-8 w-8 items-center justify-center rounded-lg transition ${rightPanel === "preview" ? "bg-black/[0.06] text-ink dark:bg-white/[0.1] dark:text-[var(--fg)]" : "text-ink-muted/60 hover:bg-black/[0.04] hover:text-ink dark:text-[var(--muted)] dark:hover:bg-white/[0.06]"}`}
+          >
+            <PreviewIcon className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
             onClick={handleOpenInVSCode}
             title="Open in VS Code"
             className="flex items-center gap-1.5 rounded-lg border border-black/[0.06] bg-white/80 px-2.5 py-1.5 text-[10px] font-semibold text-ink-muted transition hover:border-black/[0.12] hover:text-ink dark:border-white/[0.08] dark:bg-white/[0.06] dark:text-[var(--muted)] dark:hover:border-white/[0.14]"
@@ -1089,7 +1381,14 @@ export default function SoloChatPage() {
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
             {/* Messages */}
             <div ref={conversationRef} className="min-h-0 flex-1 overflow-y-auto custom-scroll px-5 py-6">
-              {!activeSession || activeSession.messages.length === 0 ? (
+              {(() => {
+                // If a peer is streaming for the active (or requested) session, treat it as live.
+                const peerStreamForActive = Object.values(peerStreams).find(
+                  (s) => s.scope === "solo-chat" && s.sessionId && (s.sessionId === activeSessionId || s.sessionId === requestedSessionId),
+                );
+                const showEmpty = !peerStreamForActive && (!activeSession || (activeSession.messages.length === 0 && !activePlan && !isGenerating));
+                return showEmpty;
+              })() ? (
                 <div className="flex h-full flex-col items-center justify-center">
                   <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500/20 to-blue-500/20 ring-1 ring-violet-500/20">
                     <CodeBracketIcon className="h-8 w-8 text-violet-400/80" />
@@ -1113,7 +1412,49 @@ export default function SoloChatPage() {
                 </div>
               ) : (
                 <div className="mx-auto max-w-3xl space-y-5">
-                  {activeSession.messages.map((msg) => (
+                  {activePlan ? (
+                    <div className="rounded-2xl border border-violet-500/15 bg-gradient-to-br from-violet-500/[0.06] to-blue-500/[0.04] p-4 ring-1 ring-violet-500/10">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-violet-600 dark:text-violet-400">
+                            {activePlan.status === "completed" ? "Plan complete" : "Executing plan"}
+                          </span>
+                          <Link
+                            href={`/project/plans?id=${encodeURIComponent(activePlan.id)}`}
+                            className="truncate text-[12px] font-semibold theme-fg hover:text-violet-500"
+                          >
+                            {activePlan.title}
+                          </Link>
+                        </div>
+                        <span className="flex-shrink-0 text-[10px] font-medium theme-muted">
+                          {activePlan.steps.filter((s) => s.status === "done" || s.status === "skipped").length}
+                          {" / "}
+                          {activePlan.steps.length} steps
+                        </span>
+                      </div>
+                      <ol className="mt-3 space-y-1.5">
+                        {activePlan.steps.map((step, i) => {
+                          const isDone = step.status === "done";
+                          const isSkipped = step.status === "skipped";
+                          return (
+                            <li key={step.id} className="flex items-start gap-2 text-[12px]">
+                              <span className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
+                                isDone ? "bg-emerald-500/20 text-emerald-600 dark:text-emerald-400"
+                                : isSkipped ? "bg-amber-500/20 text-amber-600 dark:text-amber-400"
+                                : "bg-black/[0.06] text-ink-muted dark:bg-white/[0.08] dark:text-[var(--muted)]"
+                              }`}>
+                                {isDone ? "✓" : isSkipped ? "↷" : i + 1}
+                              </span>
+                              <span className={`min-w-0 flex-1 ${isDone ? "line-through theme-muted" : isSkipped ? "italic theme-muted" : "theme-fg"}`}>
+                                {step.text}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    </div>
+                  ) : null}
+                  {(activeSession?.messages ?? []).map((msg) => (
                     <div key={msg.id}>
                       {msg.isAI ? (
                         <div className="flex gap-3">
@@ -1129,8 +1470,26 @@ export default function SoloChatPage() {
                             <div className="mt-1.5">
                               <RunSummaryCard text={msg.text} />
                             </div>
-                            {msg.checkpointId ? (
                             <div className="mt-2.5 flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={handleOpenPreview}
+                                className="inline-flex items-center gap-1 rounded-lg border border-black/[0.06] bg-black/[0.02] px-2.5 py-1.5 text-[10px] font-semibold theme-muted transition hover:border-cyan-500/30 hover:bg-cyan-500/5 hover:text-cyan-500 dark:border-white/[0.06] dark:bg-white/[0.02] dark:hover:border-cyan-500/30"
+                                title="Open the project preview"
+                              >
+                                <PreviewIcon className="h-3 w-3" />
+                                Preview
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleForceReset()}
+                                className="inline-flex items-center gap-1 rounded-lg border border-amber-500/20 bg-amber-500/8 px-2.5 py-1.5 text-[10px] font-semibold text-amber-600 transition hover:bg-amber-500/15 dark:text-amber-300"
+                                title="Force-kill the stuck agent and clean up"
+                              >
+                                <ResetIcon className="h-3 w-3" />
+                                Force Reset
+                              </button>
+                              {msg.checkpointId ? (
                               <button
                                 type="button"
                                 onClick={async () => {
@@ -1159,7 +1518,24 @@ export default function SoloChatPage() {
                                 </svg>
                                 Restore checkpoint
                               </button>
+                              ) : null}
                             </div>
+                            {msg.planId ? (
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                {(() => {
+                                  const linked = { planId: msg.planId, title: (msg.planTitle as string) || "Plan" };
+                                  if (!linked) return null;
+                                  return (
+                                    <Link
+                                      href={`/project/plans?id=${encodeURIComponent(linked.planId)}`}
+                                      className="inline-flex items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/10 px-2.5 py-1.5 text-[10px] font-semibold text-violet-600 transition hover:bg-violet-500/20 dark:text-violet-300"
+                                    >
+                                      <span className="truncate">Plan: {linked.title}</span>
+                                      <span>→</span>
+                                    </Link>
+                                  );
+                                })()}
+                              </div>
                             ) : null}
                           </div>
                         </div>
@@ -1204,6 +1580,7 @@ export default function SoloChatPage() {
                                 sessionId: activeSessionId,
                                 prompt: newText,
                                 model,
+                                mode: chatMode,
                               });
                             } catch (err) {
                               const errorMsg = {
@@ -1231,7 +1608,16 @@ export default function SoloChatPage() {
                   {/* P2P Peer Live Stream */}
                   {Object.entries(peerStreams).map(([peerId, stream]) => {
                     const isSoloChatStream = stream.scope === "solo-chat";
-                    const matchesSession = isSoloChatStream && stream.sessionId && stream.sessionId === activeSessionId;
+                    // Show the live timeline whenever a solo-chat stream is active. We used
+                    // to gate this on stream.sessionId === activeSessionId, but on the peer
+                    // machine activeSessionId may not match (race between auto-bind, tab
+                    // selection, and incoming tokens). The peer just wants to see the live
+                    // output for any solo-chat run on this project.
+                    const matchesSession = isSoloChatStream && (
+                      !stream.sessionId ||
+                      !activeSessionId ||
+                      stream.sessionId === activeSessionId
+                    );
 
                     if (!isSoloChatStream) {
                       // Non-freestyle stream: show "Agent running in X" banner
@@ -1297,11 +1683,13 @@ export default function SoloChatPage() {
                               AI responding
                             </span>
                           </div>
-                          <div className="mt-1.5 app-surface overflow-hidden rounded-[1.2rem] shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
-                            <pre className="custom-scroll max-h-[280px] min-h-[60px] overflow-y-auto px-4 py-3 font-mono text-[11.5px] leading-[1.72] theme-soft whitespace-pre-wrap">
-                              {stream.tokens.slice(-4000) || <span className="theme-muted italic">Waiting for response...</span>}
-                            </pre>
-                          </div>
+                          <ActivityStream
+                            text={stream.tokens}
+                            rawText={stream.tokens}
+                            isStreaming
+                            className="mt-1.5 max-h-[400px] app-surface overflow-hidden rounded-[1.2rem] shadow-[0_8px_24px_rgba(0,0,0,0.06)]"
+                            showRawOutput
+                          />
                         </div>
                       </div>
                     );
@@ -1315,6 +1703,14 @@ export default function SoloChatPage() {
                         <div className="flex items-center gap-2">
                           <span className="text-[12px] font-semibold theme-fg">Coding Agent</span>
                           <span className="animate-pulse text-[10px] text-violet-500">Thinking...</span>
+                          <button
+                            type="button"
+                            onClick={() => void handleForceReset()}
+                            className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[9px] font-semibold text-amber-600 transition hover:bg-amber-500/18 dark:text-amber-300"
+                            title="Force-kill the stuck agent and clean up"
+                          >
+                            Force Reset
+                          </button>
                         </div>
                         {liveEvents.length > 0 ? (
                           <ActivityStream events={liveEvents} rawText={liveGetRawText()} isStreaming={isGenerating} className="max-h-[400px]" showRawOutput />
@@ -1430,6 +1826,60 @@ export default function SoloChatPage() {
                       e.currentTarget.value = "";
                     }}
                   />
+                  {pendingApproval ? (
+                    <div className="border-b border-amber-500/20 bg-amber-500/8 px-3.5 py-2.5 dark:bg-amber-500/6">
+                      <div className="mb-1.5 flex items-center gap-1.5">
+                        <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">Approval required</span>
+                      </div>
+                      <p className="mb-2 text-[12px] font-medium theme-fg">
+                        <span className="font-mono text-[11px] text-amber-700 dark:text-amber-300">{pendingApproval.toolName}</span>
+                        {pendingApproval.toolInput && Object.keys(pendingApproval.toolInput).length > 0 ? (
+                          <span className="ml-1 text-[11px] theme-muted">
+                            — {Object.entries(pendingApproval.toolInput).map(([k, v]) => `${k}: ${String(v).slice(0, 60)}`).join(", ")}
+                          </span>
+                        ) : null}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPendingApproval(null);
+                            void window.electronAPI?.project?.approveToolCall?.({ approved: true });
+                          }}
+                          className="rounded-md bg-emerald-500/12 px-3 py-1 text-[12px] font-semibold text-emerald-700 transition hover:bg-emerald-500/20 dark:text-emerald-400"
+                        >
+                          Allow
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPendingApproval(null);
+                            void window.electronAPI?.project?.cancelActiveRequest?.();
+                          }}
+                          className="rounded-md bg-red-500/10 px-3 py-1 text-[12px] font-semibold text-red-600 transition hover:bg-red-500/20 dark:text-red-400"
+                        >
+                          Deny
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {pendingQuestion ? (
+                    <QuestionCard
+                      question={pendingQuestion}
+                      onAnswer={({ answer, optionId }) => {
+                        const q = pendingQuestion;
+                        setPendingQuestion(null);
+                        void window.electronAPI?.project?.answerAgentQuestion?.({ id: q.id, answer, optionId });
+                        // If the run already finished, feed the answer as the next prompt.
+                        if (!isGenerating) {
+                          setComposerText(answer);
+                          // Slight delay so React state settles before send picks it up.
+                          setTimeout(() => void handleSendMessage(), 0);
+                        }
+                      }}
+                      onDismiss={() => setPendingQuestion(null)}
+                    />
+                  ) : null}
                   {codeAttachedFiles.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
                       {codeAttachedFiles.map((f) => {
@@ -1531,15 +1981,29 @@ export default function SoloChatPage() {
                         </button>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void handleSendMessage()}
-                      disabled={!composerText.trim() || inputBlocked}
-                      className="flex h-7 items-center gap-1.5 rounded-full bg-[#111214] px-3.5 text-[10.5px] font-semibold text-[#f4efe6] transition hover:bg-[#0b1220] disabled:opacity-30 disabled:hover:bg-[#111214] dark:bg-white/90 dark:text-[#111214] dark:hover:bg-white"
-                    >
-                      <SendIcon className="h-3.5 w-3.5" />
-                      Send
-                    </button>
+                    {isGenerating ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void window.electronAPI?.project?.cancelActiveRequest?.();
+                        }}
+                        className="flex h-7 items-center gap-1.5 rounded-full bg-red-500/90 px-3.5 text-[10.5px] font-semibold text-white transition hover:bg-red-500"
+                        title="Stop the running agent"
+                      >
+                        <span className="flex h-2.5 w-2.5 items-center justify-center"><span className="h-2 w-2 rounded-[1px] bg-white" /></span>
+                        Stop
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleSendMessage()}
+                        disabled={!composerText.trim() || inputBlocked}
+                        className="flex h-7 items-center gap-1.5 rounded-full bg-[#111214] px-3.5 text-[10.5px] font-semibold text-[#f4efe6] transition hover:bg-[#0b1220] disabled:opacity-30 disabled:hover:bg-[#111214] dark:bg-white/90 dark:text-[#111214] dark:hover:bg-white"
+                      >
+                        <SendIcon className="h-3.5 w-3.5" />
+                        Send
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1676,6 +2140,10 @@ export default function SoloChatPage() {
                       </pre>
                     </div>
                   ) : null}
+                </div>
+              ) : rightPanel === "preview" ? (
+                <div className="relative flex min-h-0 flex-1 overflow-hidden">
+                  <ProjectPreviewPage />
                 </div>
               ) : rightPanel === "terminal" ? (
                 <>

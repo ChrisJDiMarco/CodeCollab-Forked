@@ -16,6 +16,7 @@ function createSharedStateService() {
     "members",
     "versions",
     "docs",
+    "plans",
   ];
 
   async function ensureSharedDir(repoPath) {
@@ -218,6 +219,77 @@ function createSharedStateService() {
     return members;
   }
 
+  // ─── Plans v2 (flat, executable plans) ──────────────────────────────────
+
+  function sanitizePlanId(planId) {
+    if (typeof planId !== "string" || !planId) {
+      throw new Error("Plan id must be a non-empty string.");
+    }
+    if (!/^[A-Za-z0-9_.-]{1,128}$/.test(planId)) {
+      throw new Error("Plan id contains invalid characters.");
+    }
+    return planId;
+  }
+
+  async function savePlanV2(repoPath, plan) {
+    const id = sanitizePlanId(plan?.id);
+    const payload = JSON.stringify(plan, null, 2);
+    await writeSharedFile(repoPath, `plans/${id}.json`, payload);
+    return plan;
+  }
+
+  async function loadPlanV2(repoPath, planId) {
+    const id = sanitizePlanId(planId);
+    const result = await readSharedFile(repoPath, `plans/${id}.json`);
+    if (!result.exists || !result.content) return null;
+    try { return JSON.parse(result.content); }
+    catch { return null; }
+  }
+
+  async function deletePlanV2(repoPath, planId) {
+    const id = sanitizePlanId(planId);
+    let filePath;
+    try { filePath = resolveSharedPath(repoPath, `plans/${id}.json`); }
+    catch { return { deleted: false }; }
+    try {
+      await fs.unlink(filePath);
+      return { deleted: true };
+    } catch {
+      return { deleted: false };
+    }
+  }
+
+  async function listPlansV2(repoPath) {
+    const entries = await listSharedDir(repoPath, "plans");
+    const plans = [];
+    for (const entry of entries) {
+      if (entry.type === "file" && entry.name.endsWith(".json")) {
+        try {
+          const content = await fs.readFile(entry.path, "utf-8");
+          plans.push(JSON.parse(content));
+        } catch { /* skip corrupted */ }
+      }
+    }
+    return plans;
+  }
+
+  async function readActivePlanId(repoPath) {
+    const result = await readSharedFile(repoPath, "active-plan.json");
+    if (!result.exists || !result.content) return null;
+    try {
+      const data = JSON.parse(result.content);
+      return typeof data?.activePlanId === "string" ? data.activePlanId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function writeActivePlanId(repoPath, activePlanId) {
+    const data = { activePlanId: activePlanId ?? null, updatedAt: new Date().toISOString() };
+    await writeSharedFile(repoPath, "active-plan.json", JSON.stringify(data, null, 2));
+    return data;
+  }
+
   return {
     ensureSharedDir,
     isInitialized,
@@ -229,6 +301,12 @@ function createSharedStateService() {
     listConversations,
     saveMember,
     listMembers,
+    savePlanV2,
+    loadPlanV2,
+    deletePlanV2,
+    listPlansV2,
+    readActivePlanId,
+    writeActivePlanId,
   };
 }
 

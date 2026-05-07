@@ -112,7 +112,7 @@ type QueueItem = {
   id: string;
   title: string;
   description: string;
-  kind: "approval" | "active" | "sync";
+  kind: "approval" | "active" | "sync" | "question";
   since: number;
 };
 
@@ -347,6 +347,19 @@ export default function ActivityPage() {
           });
         }
       } catch { nextApproval = null; }
+      try {
+        const pendingQ = await window.electronAPI!.project.getPendingQuestion?.();
+        if (pendingQ && typeof pendingQ === "object") {
+          const requestedAtMs = Date.parse(pendingQ.requestedAt) || Date.now();
+          items.push({
+            id: pendingQ.id,
+            kind: "question",
+            title: "Agent is asking you a question",
+            description: pendingQ.question.slice(0, 240),
+            since: requestedAtMs,
+          });
+        }
+      } catch { /* ignore */ }
       try {
         const active = await window.electronAPI!.project.getActiveRequest?.();
         if (active && typeof active === "object") {

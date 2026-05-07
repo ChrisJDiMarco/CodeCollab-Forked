@@ -471,6 +471,7 @@ function createP2PService({ sharedStateService, sendEvent: initialSendEvent }) {
           sessionId: sanitizeId(msg.sessionId) || existing.sessionId || null,
           sessionTitle: typeof msg.sessionTitle === "string" ? msg.sessionTitle.slice(0, 200) : existing.sessionTitle || null,
           updatedAt: Date.now(),
+          loggedFirst: true,
         };
         session.peerStreamAccumulators.set(peerId, accumulated);
         sendEvent("p2p:chatToken", {

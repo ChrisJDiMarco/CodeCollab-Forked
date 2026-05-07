@@ -13,6 +13,7 @@ echo  [P2P:xxxx] Peer connected / disconnected     Peer lifecycle
 echo  [P2P:xxxx] Joined room / Reconnecting        Room state
 echo  [P2P-sync] Peer "name" connected             Initial thread broadcast
 echo  [P2P-apply] plan from peer                   Incoming plan merge
+echo  [P2P-apply] plan-v2 from peer                Saved plan/progress sync
 echo  [P2P-apply] task "..." planned -^> building   Task status sync
 echo  [P2P-apply] conversation from peer           Chat message sync
 echo  [P2P-apply] thread-sync from peer            Full thread backfill
