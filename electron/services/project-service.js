@@ -2924,6 +2924,7 @@ function createProjectService({ app, settingsService, toolingService, p2pService
 
   async function saveProject(nextProject) {
     console.log(`[saveProject] Saving project ${nextProject.id}, conversation: ${nextProject.dashboard?.conversation?.length ?? 'N/A'} messages`);
+    let savedSettings = null;
     await settingsService.atomicUpdate((settings) => {
       const existing = (settings.projects ?? []).find(p => p.id === nextProject.id);
       if (existing) {
@@ -2980,14 +2981,25 @@ function createProjectService({ app, settingsService, toolingService, p2pService
       }
 
       const nextProjects = [mergedProject, ...(settings.projects ?? []).filter((project) => project.id !== mergedProject.id)];
-      return {
+      const updated = {
         ...settings,
         projects: nextProjects,
         activeProjectId: mergedProject.id,
         recentRepositories: Array.from(new Set([mergedProject.repoPath, ...(settings.recentRepositories ?? [])])).slice(0, 8),
         workspaceRoots: Array.from(new Set([mergedProject.repoPath, ...(settings.workspaceRoots ?? [])])).slice(0, 8),
       };
+      savedSettings = updated;
+      return updated;
     });
+
+    // Notify renderers that settings changed so the UI can re-render with the
+    // saved agent response immediately. Without this, plan-execution and
+    // freestyle responses don't render until the user navigates away and back.
+    try {
+      if (savedSettings && eventSender) {
+        eventSender("settings:changed", savedSettings);
+      }
+    } catch (_) { /* swallow */ }
 
     // Broadcast agent config snapshot to P2P peers (lightweight summary only)
     try {
